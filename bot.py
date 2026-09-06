@@ -38,6 +38,8 @@ WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 
 CHANNEL_URL = "https://t.me/NovaLinkNETPN"
 BRAND = "NovaLinkVPN"
+PUBLIC_OWNER_USERNAME = "ELFERN_AMI"
+PUBLIC_OWNER_URL = f"https://t.me/{PUBLIC_OWNER_USERNAME}"
 
 DATA_FILE = "data.json"
 BACKUP_DIR = "backups"
@@ -132,6 +134,7 @@ def default_data():
 data = default_data()
 application = None
 data_lock = asyncio.Lock()
+purchase_lock = asyncio.Lock()
 
 
 # =========================================================
@@ -1173,6 +1176,15 @@ async def show_discount(query, context):
     )
 
 
+async def buy_with_wallet(query, user_id, service_id):
+    """Concurrency-safe purchase entry point: prevents double assignment of one config."""
+    if purchase_lock.locked():
+        await query.answer("⏳ یک خرید دیگر در حال پردازش است؛ چند لحظه صبر کن.", show_alert=True)
+        return
+    async with purchase_lock:
+        return await _buy_with_wallet_locked(query, user_id, service_id)
+
+
 async def apply_discount(update, code):
     user = data["users"].get(str(update.effective_user.id))
     discount = data["discounts"].get(code.upper())
@@ -1462,6 +1474,64 @@ async def admin_service_view(query, service_id):
             ],
         ]),
     )
+
+
+async def admin_ops_center(query):
+    if not can_admin(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+    pending = sum(1 for x in data.get("topups",{}).values() if x.get("status") == "pending")
+    open_tickets = sum(1 for x in data.get("tickets",{}).values() if x.get("status") == "open")
+    low = []
+    total_free = 0
+    for s in data.get("services",{}).values():
+        free = free_config_count(s)
+        total_free += free
+        if free <= int(data.get("settings",{}).get("low_stock_threshold",3)):
+            low.append((s.get("name","-"), free))
+    rows = [
+        [InlineKeyboardButton(f"💰 درخواست شارژ ({pending})", callback_data="admin_topups")],
+        [InlineKeyboardButton(f"🎫 تیکت باز ({open_tickets})", callback_data="admin_support")],
+        [InlineKeyboardButton(f"🟢 موجودی آزاد کل: {total_free}", callback_data="config_free")],
+        [InlineKeyboardButton(f"⚠️ هشدار موجودی ({len(low)})", callback_data="admin_stock_alerts")],
+        [InlineKeyboardButton("🔑 مرکز کانفیگ", callback_data="admin_configs")],
+        [InlineKeyboardButton("💾 بکاپ فوری", callback_data="backup_now")],
+        [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin_home")],
+    ]
+    alert_text = "✅ هیچ پلنی در محدوده کم‌موجودی نیست."
+    if low:
+        alert_text = "\n".join(f"• {esc(name)}: {count} عدد" for name, count in low[:20])
+    await query.edit_message_text(
+        "⚡ مرکز عملیات NovaLinkVPN\n\n"
+        f"💰 درخواست شارژ در انتظار: {pending}\n"
+        f"🎫 تیکت باز: {open_tickets}\n"
+        f"🔑 کانفیگ آزاد: {total_free}\n\n"
+        "⚠️ کمبود موجودی:\n" + alert_text,
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode="HTML",
+    )
+
+
+async def admin_stock_alerts(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+    threshold = int(data.get("settings",{}).get("low_stock_threshold",3))
+    items=[]
+    for sid, s in data.get("services",{}).items():
+        free=free_config_count(s)
+        if free <= threshold:
+            items.append((free, s.get("name","-"), sid))
+    items.sort(key=lambda x:(x[0], x[1]))
+    rows=[]
+    for free,name,sid in items[:25]:
+        rows.append([InlineKeyboardButton(f"⚠️ {name} | {free} آزاد", callback_data=f"config_inventory:{sid}")])
+    if not rows:
+        text="✅ همه پلن‌ها موجودی مناسبی دارند."
+    else:
+        text=f"⚠️ هشدار موجودی\n\nحد هشدار: {threshold}\n\nپلن‌ها:"
+    rows.append([InlineKeyboardButton("🔙 مرکز عملیات", callback_data="admin_ops")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def admin_configs_home(query):
@@ -3504,9 +3574,13 @@ BASE_MESSAGE_HANDLER = message_handler
 
 def default_data():
     d = BASE_DEFAULT_DATA()
+    d.setdefault("meta", {})["version"] = 5
     d.setdefault("settings", {}).update({
-        "support_username": d.get("settings", {}).get("support_username", ""),
+        "support_username": PUBLIC_OWNER_USERNAME,
         "admin_display_id": str(ADMIN_ID or ""),
+        "public_owner_username": PUBLIC_OWNER_USERNAME,
+        "public_owner_url": PUBLIC_OWNER_URL,
+        "shop_low_stock_note": "موجودی به‌صورت زنده بررسی می‌شود.",
         "shop_title": "🛒 فروشگاه NovaLinkVPN",
         "shop_description": "سرویس‌های موجود را انتخاب کن و خریدت را انجام بده.",
         "maintenance_message": "🛠 ربات موقتاً در حال بروزرسانی است.",
@@ -3532,6 +3606,10 @@ def normalize_data():
     data.setdefault("favorites", {})
     s=data.setdefault("settings", {})
     s.setdefault("admin_display_id", str(ADMIN_ID or ""))
+    s["support_username"] = PUBLIC_OWNER_USERNAME
+    s.setdefault("public_owner_username", PUBLIC_OWNER_USERNAME)
+    s.setdefault("public_owner_url", PUBLIC_OWNER_URL)
+    s.setdefault("shop_low_stock_note", "موجودی به‌صورت زنده بررسی می‌شود.")
     s.setdefault("shop_title", "🛒 فروشگاه NovaLinkVPN")
     s.setdefault("shop_description", "سرویس‌های موجود را انتخاب کن و خریدت را انجام بده.")
     s.setdefault("maintenance_message", "🛠 ربات موقتاً در حال بروزرسانی است.")
@@ -3657,14 +3735,15 @@ def admin_keyboard(role="owner"):
     rows = [
         [InlineKeyboardButton("📊 داشبورد", callback_data="admin_dashboard"), InlineKeyboardButton("👥 کاربران", callback_data="admin_users")],
         [InlineKeyboardButton("📦 سرویس‌ها", callback_data="admin_services"), InlineKeyboardButton("🔑 مرکز کانفیگ", callback_data="admin_configs")],
-        [InlineKeyboardButton("🛒 سفارش‌ها", callback_data="admin_orders"), InlineKeyboardButton("💰 درخواست شارژ", callback_data="admin_topups")],
-        [InlineKeyboardButton("💳 تراکنش‌ها", callback_data="admin_transactions"), InlineKeyboardButton("🎁 تخفیف‌ها", callback_data="admin_discounts")],
-        [InlineKeyboardButton("⭐ دعوت‌ها", callback_data="admin_referral"), InlineKeyboardButton("🎫 پشتیبانی", callback_data="admin_support")],
-        [InlineKeyboardButton("📢 ارسال همگانی", callback_data="admin_broadcast"), InlineKeyboardButton("📈 گزارش‌های حرفه‌ای", callback_data="admin_reports_pro")],
-        [InlineKeyboardButton("💾 بکاپ / بازیابی", callback_data="admin_backup"), InlineKeyboardButton("⚙️ تنظیمات", callback_data="admin_settings")],
+        [InlineKeyboardButton("⚡ مرکز عملیات", callback_data="admin_ops"), InlineKeyboardButton("💰 درخواست شارژ", callback_data="admin_topups")],
+        [InlineKeyboardButton("🛒 سفارش‌ها", callback_data="admin_orders"), InlineKeyboardButton("💳 تراکنش‌ها", callback_data="admin_transactions")],
+        [InlineKeyboardButton("🎁 تخفیف‌ها", callback_data="admin_discounts"), InlineKeyboardButton("⭐ دعوت‌ها", callback_data="admin_referral")],
+        [InlineKeyboardButton("🎫 پشتیبانی", callback_data="admin_support"), InlineKeyboardButton("📢 ارسال همگانی", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("📈 گزارش‌های حرفه‌ای", callback_data="admin_reports_pro"), InlineKeyboardButton("💾 بکاپ / بازیابی", callback_data="admin_backup")],
+        [InlineKeyboardButton("⚙️ تنظیمات", callback_data="admin_settings"), InlineKeyboardButton("🛡️ دسترسی مدیران", callback_data="admin_staff")] if role == "owner" else [InlineKeyboardButton("⚙️ تنظیمات", callback_data="admin_settings")],
     ]
     if role == "owner":
-        rows.append([InlineKeyboardButton("🛡️ دسترسی مدیران", callback_data="admin_staff"), InlineKeyboardButton("🧾 لاگ مدیریت", callback_data="admin_audit")])
+        rows.append([InlineKeyboardButton("🧾 لاگ مدیریت", callback_data="admin_audit")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -3710,19 +3789,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_wallet(query, user_id):
     u=user_record(user_id)
     pending=sum(1 for x in data.get("topups",{}).values() if x.get("user_id")==user_id and x.get("status")=="pending")
-    admin_id=data.get("settings",{}).get("admin_display_id") or str(ADMIN_ID)
-    support=data.get("settings",{}).get("support_username","").strip().lstrip("@")
+    support=PUBLIC_OWNER_USERNAME
     rows=[[InlineKeyboardButton("➕ افزایش موجودی", callback_data="wallet_topup")],
           [InlineKeyboardButton("🧾 تاریخچه تراکنش‌ها", callback_data="transactions")]]
     if pending:
         rows.append([InlineKeyboardButton(f"⏳ درخواست‌های در انتظار ({pending})", callback_data="topup_mystatus")])
+    rows.append([InlineKeyboardButton("👤 ارتباط با مدیریت", url=PUBLIC_OWNER_URL)])
     rows.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")])
-    contact = f"@{support}" if support else f"آیدی عددی مدیریت: {admin_id}"
     await query.edit_message_text(
-        f"💳 کیف پول\n\n💰 موجودی: {money(u.get('balance',0))} تومان\n\n"
-        "➕ افزایش موجودی آنلاین در نسخه فعلی به درگاه متصل نشده است.\n"
-        "در نسخه بعدی امکان اتصال مستقیم به درگاه پرداخت فراهم می‌شود.\n\n"
-        f"📞 برای شارژ دستی فعلاً با مدیریت ارتباط بگیر:\n{contact}\n🆔 ID: <code>{esc(admin_id)}</code>",
+        f"💳 کیف پول\n\n💰 موجودی فعلی: {money(u.get('balance',0))} تومان\n\n"
+        "🚧 شارژ آنلاین فعلاً فعال نیست.\n"
+        "در نسخه بعدی اتصال مستقیم به درگاه پرداخت اضافه خواهد شد.\n\n"
+        f"📞 برای افزایش موجودی فعلاً با مدیریت هماهنگ کن:\n@{support}\n\n"
+        "✅ درخواستت از داخل ربات ثبت می‌شود و بعد از تأیید مدیریت، موجودی اضافه خواهد شد.",
         reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
 
 
@@ -3773,11 +3852,11 @@ async def show_order_detail(query, order_id):
 
 async def wallet_topup_start(query, context):
     context.user_data["state"]="wallet_topup_amount"
-    admin_id=data.get("settings",{}).get("admin_display_id") or str(ADMIN_ID)
     await query.edit_message_text(
         "➕ درخواست افزایش موجودی\n\nمبلغ موردنظر را به تومان بفرست.\n"
-        f"🆔 بعد از ارسال، درخواست برای مدیریت با ID {admin_id} ثبت می‌شود.\n\n/cancel برای لغو",
-        reply_markup=back_home())
+        f"👤 مدیریت: @{PUBLIC_OWNER_USERNAME}\n"
+        "درخواست پس از ثبت برای مدیریت ارسال می‌شود.\n\n/cancel برای لغو",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👤 ارتباط با مدیریت", url=PUBLIC_OWNER_URL)], [InlineKeyboardButton("🔙 خانه", callback_data="home")]]))
 
 
 async def topup_mystatus(query,user_id):
@@ -3868,7 +3947,8 @@ async def show_shop(query):
     rows.append([InlineKeyboardButton("🔄 بروزرسانی",callback_data="shop"),InlineKeyboardButton("🏠 خانه",callback_data="home")])
     await query.edit_message_text(
         f"{data.get('settings',{}).get('shop_title','🛒 فروشگاه NovaLinkVPN')}\n\n"
-        f"{esc(data.get('settings',{}).get('shop_description',''))}\n\n✅ فقط پلن‌های دارای کانفیگ آزاد نمایش داده می‌شوند.",
+        f"{esc(data.get('settings',{}).get('shop_description',''))}\n\n✅ فقط پلن‌های قابل خرید نمایش داده می‌شوند.\n"
+        "🔄 موجودی هر پلن لحظه‌ای بررسی می‌شود.",
         reply_markup=InlineKeyboardMarkup(rows),parse_mode="HTML")
 
 
@@ -3916,7 +3996,7 @@ async def confirm_buy(query, service_id):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 تایید خرید",callback_data=f"buy_wallet:{service_id}")],[InlineKeyboardButton("❌ لغو",callback_data=f"view_service:{service_id}")]]))
 
 
-async def buy_with_wallet(query,user_id,service_id):
+async def _buy_with_wallet_locked(query,user_id,service_id):
     user=user_record(user_id); plan=data.get("services",{}).get(service_id)
     if not user or not plan or not plan.get("active",True):
         await query.edit_message_text("❌ سرویس قابل خرید نیست.",reply_markup=back_home()); return
@@ -3967,11 +4047,21 @@ async def buy_with_wallet(query,user_id,service_id):
                         break
         await save_data()
     except Exception:
-        user["balance"]=before_balance; config_item["status"]=before_status; config_item["assigned_to"]=None; config_item["assigned_service_id"]=None; config_item["assigned_at"]=None
-        for k in (owned_id,): data["services"].pop(k,None)
+        user["balance"]=before_balance
+        config_item["status"]=before_status
+        config_item["assigned_to"]=None
+        config_item["assigned_service_id"]=None
+        config_item["assigned_at"]=None
+        data["services"].pop(owned_id,None)
         data["orders"].pop(order_id,None)
+        # Remove any partially appended references/transaction created before failure.
+        for key in ("service_ids", "order_ids", "transaction_ids"):
+            if key in user:
+                user[key] = [x for x in user.get(key, []) if x not in {owned_id, order_id, txid if 'txid' in locals() else ''}]
+        if 'txid' in locals():
+            data.get("transactions",{}).pop(txid,None)
         await save_data()
-        await query.edit_message_text("❌ خطای داخلی در ثبت خرید؛ مبلغ محفوظ ماند.",reply_markup=back_home()); return
+        await query.edit_message_text("❌ خطای داخلی در ثبت خرید؛ مبلغ محفوظ ماند و کانفیگ برگشت داده شد.",reply_markup=back_home()); return
     user_keyboard.current_user_id=user_id
     await query.edit_message_text(
         f"✅ خرید با موفقیت انجام شد!\n\n📦 سرویس: {esc(plan.get('name',''))}\n💰 مبلغ: {money(final_price)} تومان\n"
@@ -4131,7 +4221,7 @@ async def admin_configs_sold(query):
         chunks=[]
         for dt,s,x in rows:
             chunks.append(f"📦 {esc(s.get('name','-'))}\n👤 {x.get('assigned_to')}\n🔑 {x.get('id')} | {mask_config(x.get('config',''))}\n🕒 {dt}")
-        text="🔴 کانفیگ‌های فروخته‌شده\n\n"+"\n\n".join(chunks)
+        text=f"🔴 کانفیگ‌های فروخته‌شده\n\n📦 تعداد نمایش داده‌شده: {len(chunks)}\n\n"+"\n\n".join(chunks)
     await query.edit_message_text(text,reply_markup=back_admin(),parse_mode="HTML")
 
 
@@ -4232,6 +4322,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if k.startswith("topup_view:"): return await admin_topup_view(q,k.split(":",1)[1])
     if k.startswith("topup_approve:"): return await approve_topup(q,context,k.split(":",1)[1],True)
     if k.startswith("topup_reject:"): return await approve_topup(q,context,k.split(":",1)[1],False)
+    if k=="admin_ops": return await admin_ops_center(q)
+    if k=="admin_stock_alerts": return await admin_stock_alerts(q)
     if k=="admin_reports_pro": return await admin_reports_pro(q)
     if k=="admin_audit": return await admin_audit(q)
     if k=="config_search": return await config_search_start(q,context)
