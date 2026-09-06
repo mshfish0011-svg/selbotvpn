@@ -400,6 +400,11 @@ def admin_keyboard(role="owner"):
         ],
     ]
 
+    if role in {"owner", "manager"}:
+        rows.append([
+            InlineKeyboardButton("🔑 مدیریت کانفیگ‌ها", callback_data="admin_configs"),
+        ])
+
     if role == "owner":
         rows.append([
             InlineKeyboardButton("🛡️ دسترسی مدیران", callback_data="admin_staff"),
@@ -588,6 +593,10 @@ async def admin_config_inventory(query, service_id):
 
 
 async def admin_config_list(query, service_id):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+
     service = data["services"].get(service_id)
     if not service:
         await query.edit_message_text("❌ پلن پیدا نشد.", reply_markup=back_admin())
@@ -643,14 +652,21 @@ def service_display(service):
 
 
 async def show_shop(query):
-    services = active_services()
+    # کاربران فقط پلن‌هایی را می‌بینند که فعال هستند و حداقل یک کانفیگ آزاد دارند.
+    services = [
+        service for service in active_services()
+        if free_config_count(service) > 0
+    ]
 
     if not services:
         await query.edit_message_text(
-            "🛒 فروشگاه\n\n"
-            "در حال حاضر هیچ پلن فعالی ثبت نشده است.\n"
-            "ادمین می‌تواند از پنل مدیریت پلن اضافه کند.",
-            reply_markup=back_home(),
+            "🛒 فروشگاه NovaLinkVPN\n\n"
+            "در حال حاضر هیچ پلن قابل خریدی موجود نیست.\n"
+            "لطفاً بعداً دوباره بررسی کن.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 بروزرسانی", callback_data="shop")],
+                [InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")],
+            ]),
         )
         return
 
@@ -659,17 +675,19 @@ async def show_shop(query):
         stock = free_config_count(service)
         rows.append([
             InlineKeyboardButton(
-                f"{'🟢' if stock > 0 else '🔴'} {service.get('name', 'پلن')} | {stock}",
+                f"🟢 {service.get('name', 'پلن')} | موجود: {stock}",
                 callback_data=f"view_service:{service['id']}",
             )
         ])
 
     rows.append([
-        InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")
+        InlineKeyboardButton("🔄 بروزرسانی", callback_data="shop"),
+        InlineKeyboardButton("🔙 منوی اصلی", callback_data="home"),
     ])
 
     await query.edit_message_text(
         "🛒 فروشگاه NovaLinkVPN\n\n"
+        "فقط سرویس‌های دارای موجودی نمایش داده می‌شوند.\n"
         "یک سرویس را انتخاب کن:",
         reply_markup=InlineKeyboardMarkup(rows),
     )
@@ -682,9 +700,13 @@ async def show_shop(query):
 async def view_service(query, service_id):
     service = data["services"].get(service_id)
 
-    if not service or not service.get("active", True):
+    if (
+        not service
+        or not service.get("active", True)
+        or free_config_count(service) <= 0
+    ):
         await query.edit_message_text(
-            "❌ این سرویس در دسترس نیست.",
+            "❌ این سرویس در حال حاضر موجود نیست.",
             reply_markup=back_home(),
         )
         return
@@ -695,7 +717,7 @@ async def view_service(query, service_id):
         f"🌍 سرور: {esc(service.get('server', '-'))}\n"
         f"⏳ مدت: {service.get('duration_days', 0)} روز\n"
         f"💰 قیمت: {money(service.get('price', 0))} تومان\n"
-        f"🔑 موجودی: {free_config_count(service)} عدد\n\n"
+        f"🟢 موجودی قابل فروش: {free_config_count(service)} عدد\n\n"
         f"ℹ️ {esc(service.get('description', ''))}"
     )
 
@@ -1057,24 +1079,24 @@ async def show_account(query, user_id):
 
 async def show_wallet(query, user_id):
     user = data["users"].get(str(user_id), {})
+    owner_id = str(ADMIN_ID) if ADMIN_ID else "-"
 
     await query.edit_message_text(
         "💳 کیف پول\n\n"
         f"💰 موجودی: {money(user.get('balance', 0))} تومان\n\n"
-        "افزایش موجودی آنلاین در نسخه بعدی قابل اتصال به درگاه خواهد بود.",
+        "💳 افزایش موجودی آنلاین هنوز فعال نشده است.\n"
+        "در نسخه بعدی امکان اتصال به درگاه پرداخت اضافه خواهد شد.\n\n"
+        "📩 برای افزایش موجودی فعلاً با مدیریت هماهنگ کن.\n"
+        f"🆔 آیدی مدیریت: {owner_id}",
         reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "📜 تراکنش‌ها",
-                    callback_data="transactions",
+                    "📩 ارتباط با مدیریت",
+                    url=f"tg://user?id={owner_id}" if ADMIN_ID else CHANNEL_URL,
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    "🔙 حساب کاربری",
-                    callback_data="account",
-                )
-            ],
+            [InlineKeyboardButton("📜 تراکنش‌ها", callback_data="transactions")],
+            [InlineKeyboardButton("🔙 حساب کاربری", callback_data="account")],
         ]),
     )
 
@@ -1437,6 +1459,102 @@ async def admin_service_view(query, service_id):
                     callback_data="admin_services",
                 )
             ],
+        ]),
+    )
+
+
+async def admin_configs_home(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+
+    total = 0
+    free = 0
+    sold = 0
+    for service in data["services"].values():
+        normalize_service_inventory(service)
+        total += total_config_count(service)
+        free += free_config_count(service)
+    sold = total - free
+
+    await query.edit_message_text(
+        "🔑 مدیریت کانفیگ‌ها\n\n"
+        f"📦 کل کانفیگ‌ها: {total}\n"
+        f"🟢 آماده فروش: {free}\n"
+        f"🔴 فروخته‌شده: {sold}\n\n"
+        "از اینجا موجودی فروش و سوابق تحویل را جداگانه مدیریت کن.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🟢 کانفیگ‌های آماده فروش", callback_data="config_free")],
+            [InlineKeyboardButton("🔴 کانفیگ‌های فروخته‌شده", callback_data="config_sold")],
+            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin_home")],
+        ]),
+    )
+
+
+async def admin_configs_free(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+
+    rows = []
+    total_free = 0
+    for service in list(data["services"].values())[:60]:
+        free = free_config_count(service)
+        if free <= 0:
+            continue
+        total_free += free
+        rows.append([
+            InlineKeyboardButton(
+                f"🟢 {service.get('name', 'پلن')} | {free} آماده فروش",
+                callback_data=f"config_inventory:{service['id']}",
+            )
+        ])
+
+    if not rows:
+        body = "هیچ کانفیگ آزادی برای فروش وجود ندارد."
+    else:
+        body = f"تعداد کانفیگ آماده فروش: {total_free}\n\nبرای هر پلن وارد مدیریت موجودی شو:"
+
+    rows.append([InlineKeyboardButton("🔙 مدیریت کانفیگ‌ها", callback_data="admin_configs")])
+    await query.edit_message_text(
+        "🟢 کانفیگ‌های آماده فروش\n\n" + body,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def admin_configs_sold(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+
+    sold_items = []
+    for service in data["services"].values():
+        normalize_service_inventory(service)
+        for item in service.get("config_pool", []):
+            if item.get("status") == "assigned":
+                sold_items.append((service, item))
+
+    sold_items.sort(key=lambda pair: pair[1].get("assigned_at", ""), reverse=True)
+
+    if not sold_items:
+        text = "🔴 کانفیگ‌های فروخته‌شده\n\nهنوز کانفیگی تحویل داده نشده است."
+    else:
+        lines = [f"🔴 کانفیگ‌های فروخته‌شده\n\nتعداد: {len(sold_items)}\n"]
+        for service, item in sold_items[:40]:
+            lines.append(
+                f"📦 {esc(service.get('name', '-'))}\n"
+                f"👤 کاربر: {item.get('assigned_to', '-')}\n"
+                f"🆔 کانفیگ: {item.get('id', '-')}\n"
+                f"🕒 زمان تحویل: {item.get('assigned_at', '-')}\n"
+                f"🔑 {esc(mask_config(item.get('config', '')))}\n"
+            )
+        text = "\n".join(lines)
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data="config_sold")],
+            [InlineKeyboardButton("🔙 مدیریت کانفیگ‌ها", callback_data="admin_configs")],
         ]),
     )
 
@@ -1866,7 +1984,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "message_user:", "user_services:", "aservice:", "edit_service:",
         "toggle_service:", "delete_service:", "adiscount:", "ticket:",
         "staff_", "set_", "toggle_maintenance", "toggle_expiry",
-        "renew:"
+        "renew:", "config_"
     )):
         if not role:
             await query.edit_message_text("⛔ دسترسی غیرمجاز.")
@@ -1921,6 +2039,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_user_view(query, uid_)
         return
 
+    if data_key == "admin_configs":
+        if not can_manage_services(query.from_user.id):
+            await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+            return
+        await admin_configs_home(query)
+        return
+
+    if data_key == "config_free":
+        await admin_configs_free(query)
+        return
+
+    if data_key == "config_sold":
+        await admin_configs_sold(query)
+        return
+
     if data_key == "admin_services":
         if not can_manage_services(query.from_user.id):
             await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
@@ -1929,6 +2062,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data_key.startswith("aservice:"):
+        if not can_manage_services(query.from_user.id):
+            await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+            return
         await admin_service_view(query, data_key.split(":", 1)[1])
         return
 
