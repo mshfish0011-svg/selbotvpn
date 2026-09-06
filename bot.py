@@ -107,6 +107,11 @@ def default_data():
             "expiry_notice_days": [7, 3, 1],
             "referral_reward": 0,
             "min_topup": 0,
+            "ticket_retention_hours": 72,
+            "auto_backup_enabled": True,
+            "loyalty_enabled": True,
+            "loyalty_rate": 1,
+            "max_open_tickets_per_user": 3,
         },
         "users": {},
         "services": {},
@@ -116,6 +121,8 @@ def default_data():
         "referrals": {},
         "tickets": {},
         "broadcasts": {},
+        "audit_logs": {},
+        "notifications": {},
         "admins": {
             str(ADMIN_ID): {
                 "role": "owner",
@@ -156,6 +163,8 @@ def normalize_data():
         "referrals",
         "tickets",
         "broadcasts",
+        "audit_logs",
+        "notifications",
     ]:
         if not isinstance(data.get(key), dict):
             data[key] = {}
@@ -308,6 +317,31 @@ def can_manage_support(user_id):
 
 def can_broadcast(user_id):
     return get_admin_role(user_id) in {"owner", "manager"}
+
+
+async def audit_action(admin_id, action, target="", details=""):
+    """Keep a compact audit trail in JSON."""
+    try:
+        log_id = uid("audit")
+        data.setdefault("audit_logs", {})[log_id] = {
+            "id": log_id,
+            "admin_id": int(admin_id),
+            "action": str(action),
+            "target": str(target),
+            "details": str(details)[:1000],
+            "created_at": now_iso(),
+        }
+        logs = data["audit_logs"]
+        if len(logs) > 2000:
+            keep = sorted(
+                logs,
+                key=lambda k: logs[k].get("created_at", ""),
+                reverse=True,
+            )[:2000]
+            data["audit_logs"] = {k: logs[k] for k in keep}
+        await save_data()
+    except Exception:
+        logger.exception("Audit log error.")
 
 
 # =========================================================
@@ -925,6 +959,21 @@ async def apply_discount(update, code):
 
 
 async def show_support(query, user_id):
+    open_tickets = [
+        t for t in data["tickets"].values()
+        if t.get("user_id") == user_id and t.get("status") == "open"
+    ]
+    max_open = int(data["settings"].get("max_open_tickets_per_user", 3) or 3)
+
+    if len(open_tickets) >= max_open:
+        await query.edit_message_text(
+            f"🎫 پشتیبانی\n\n"
+            f"حداکثر {max_open} تیکت باز مجاز است.\n"
+            "لطفاً یکی از تیکت‌های قبلی را تکمیل یا ببند.",
+            reply_markup=back_home(),
+        )
+        return
+
     ticket_id = uid("ticket")
 
     data["tickets"][ticket_id] = {
@@ -979,7 +1028,9 @@ def dashboard_text():
         f"🛒 سفارش پرداخت‌شده: {paid_orders}\n"
         f"💰 درآمد ثبت‌شده: {money(data['stats'].get('total_revenue', 0))} تومان\n"
         f"🎫 تیکت باز: {open_tickets}\n"
-        f"🎁 کد تخفیف: {len(data['discounts'])}\n\n"
+        f"🎁 کد تخفیف: {len(data['discounts'])}\n"
+        f"🧾 لاگ مدیریتی: {len(data.get('audit_logs', {}))}\n"
+        f"🕒 نگهداری تیکت بسته: {data['settings'].get('ticket_retention_hours', 72)} ساعت\n\n"
         f"🕒 آخرین بروزرسانی:\n{data['meta'].get('updated_at', '-')}"
     )
 
@@ -1450,7 +1501,10 @@ async def admin_settings(query):
         f"🛑 حالت تعمیرات: {'روشن' if s.get('maintenance') else 'خاموش'}\n"
         f"🔔 اعلان انقضا: {'روشن' if s.get('auto_expiry_notice') else 'خاموش'}\n"
         f"🎁 پاداش دعوت: {money(s.get('referral_reward', 0))} تومان\n"
-        f"💰 حداقل شارژ: {money(s.get('min_topup', 0))} تومان",
+        f"💰 حداقل شارژ: {money(s.get('min_topup', 0))} تومان\n"
+        f"🎫 نگهداری تیکت بسته: {s.get('ticket_retention_hours', 72)} ساعت\n"
+        f"💾 بکاپ خودکار: {'روشن' if s.get('auto_backup_enabled', True) else 'خاموش'}\n"
+        f"⭐ Loyalty: {'روشن' if s.get('loyalty_enabled', True) else 'خاموش'}",
         reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
@@ -1462,6 +1516,24 @@ async def admin_settings(query):
                 InlineKeyboardButton(
                     "🔔 اعلان انقضا",
                     callback_data="toggle_expiry",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "💾 بکاپ خودکار روشن/خاموش",
+                    callback_data="toggle_auto_backup",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⭐ Loyalty روشن/خاموش",
+                    callback_data="toggle_loyalty",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎫 مدت نگهداری تیکت",
+                    callback_data="set_ticket_retention",
                 )
             ],
             [
@@ -1806,13 +1878,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data_key.startswith("close_ticket:"):
+        if not can_manage_support(query.from_user.id):
+            await query.answer("⛔ دسترسی ندارید.", show_alert=True)
+            return
         tid = data_key.split(":", 1)[1]
         ticket = data["tickets"].get(tid)
         if ticket:
             ticket["status"] = "closed"
-            ticket["updated_at"] = now_iso()
+            ticket["closed_at"] = now_iso()
+            ticket["updated_at"] = ticket["closed_at"]
             await save_data()
-        await query.edit_message_text("✅ تیکت بسته شد.", reply_markup=back_admin())
+            await audit_action(
+                query.from_user.id,
+                "close_ticket",
+                tid,
+                f"user={ticket.get('user_id')}",
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=int(ticket.get("user_id")),
+                    text=(
+                        f"✅ تیکت {tid} بسته شد.\n\n"
+                        "این تیکت تا ۷۲ ساعت نگهداری می‌شود و سپس خودکار حذف خواهد شد."
+                    ),
+                )
+            except Exception:
+                pass
+        await query.edit_message_text(
+            "✅ تیکت بسته شد. حذف خودکار پس از ۷۲ ساعت.",
+            reply_markup=back_admin(),
+        )
         return
 
     if data_key.startswith("reply_ticket:"):
@@ -1970,6 +2065,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["settings"]["auto_expiry_notice"] = not data["settings"].get("auto_expiry_notice", True)
         await save_data()
         await admin_settings(query)
+        return
+
+    if data_key == "toggle_auto_backup":
+        if not is_owner(query.from_user.id):
+            await query.answer("فقط Owner.", show_alert=True)
+            return
+        data["settings"]["auto_backup_enabled"] = not data["settings"].get("auto_backup_enabled", True)
+        await save_data()
+        await audit_action(query.from_user.id, "toggle_auto_backup", "", str(data["settings"]["auto_backup_enabled"]))
+        await admin_settings(query)
+        return
+
+    if data_key == "toggle_loyalty":
+        if not is_owner(query.from_user.id):
+            await query.answer("فقط Owner.", show_alert=True)
+            return
+        data["settings"]["loyalty_enabled"] = not data["settings"].get("loyalty_enabled", True)
+        await save_data()
+        await audit_action(query.from_user.id, "toggle_loyalty", "", str(data["settings"]["loyalty_enabled"]))
+        await admin_settings(query)
+        return
+
+    if data_key == "set_ticket_retention":
+        if not is_owner(query.from_user.id):
+            await query.answer("فقط Owner.", show_alert=True)
+            return
+        context.user_data["state"] = "set_ticket_retention"
+        await query.edit_message_text(
+            "🎫 مدت نگهداری تیکت بسته را به ساعت بفرست.\n"
+            "پیشنهاد: 72\n\n"
+            "/cancel برای لغو",
+            reply_markup=back_admin(),
+        )
         return
 
     if data_key == "set_referral_reward":
@@ -2519,6 +2647,30 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Ticket retention
+    if state == "set_ticket_retention":
+        if not is_owner(update.effective_user.id):
+            context.user_data.clear()
+            await update.message.reply_text("⛔ فقط Owner.")
+            return
+        try:
+            hours = int(text)
+            if hours < 1 or hours > 8760:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ عدد ساعت باید بین 1 تا 8760 باشد.")
+            return
+
+        data["settings"]["ticket_retention_hours"] = hours
+        context.user_data.clear()
+        await save_data()
+        await audit_action(update.effective_user.id, "set_ticket_retention", "", str(hours))
+        await update.message.reply_text(
+            f"✅ مدت نگهداری تیکت‌های بسته روی {hours} ساعت تنظیم شد.",
+            reply_markup=admin_keyboard("owner"),
+        )
+        return
+
     # Referral reward
     if state == "set_referral_reward":
         if not is_owner(update.effective_user.id):
@@ -2664,6 +2816,51 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+# TICKET RETENTION / CLEANUP
+# =========================================================
+
+async def ticket_cleanup_worker():
+    while True:
+        try:
+            retention_hours = int(
+                data["settings"].get("ticket_retention_hours", 72) or 72
+            )
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=retention_hours)
+            deleted = []
+
+            for tid, ticket in list(data["tickets"].items()):
+                if ticket.get("status") != "closed":
+                    continue
+
+                closed_at = parse_dt(
+                    ticket.get("closed_at") or ticket.get("updated_at")
+                )
+                if not closed_at or closed_at > cutoff:
+                    continue
+
+                user = data["users"].get(str(ticket.get("user_id")))
+                if user:
+                    user["ticket_ids"] = [
+                        x for x in user.get("ticket_ids", []) if x != tid
+                    ]
+
+                data["tickets"].pop(tid, None)
+                deleted.append(tid)
+
+            if deleted:
+                await save_data()
+                logger.info("Auto-deleted %d closed tickets.", len(deleted))
+
+            await asyncio.sleep(3600)
+
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("Ticket cleanup worker error.")
+            await asyncio.sleep(60)
+
+
+# =========================================================
 # EXPIRY NOTIFICATIONS
 # =========================================================
 
@@ -2743,7 +2940,8 @@ async def auto_backup_worker():
     while True:
         try:
             await asyncio.sleep(AUTO_BACKUP_HOURS * 3600)
-            await make_backup("auto")
+            if data["settings"].get("auto_backup_enabled", True):
+                await make_backup("auto")
         except asyncio.CancelledError:
             break
         except Exception:
@@ -2867,6 +3065,10 @@ async def main():
         auto_backup_worker()
     )
 
+    ticket_cleanup_task = asyncio.create_task(
+        ticket_cleanup_worker()
+    )
+
     try:
         while True:
             await asyncio.sleep(3600)
@@ -2877,6 +3079,7 @@ async def main():
     finally:
         expiry_task.cancel()
         backup_task.cancel()
+        ticket_cleanup_task.cancel()
 
         await runner.cleanup()
 
