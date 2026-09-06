@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import logging
+import re
 import secrets
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
@@ -3467,6 +3468,809 @@ async def main():
 
         await application.stop()
         await application.shutdown()
+
+
+
+
+# =========================================================
+# NOVALINKVPN EXPANSION PACK v2
+# Professional UX, wallet requests, notifications, analytics,
+# audit trail, safer purchases, advanced config center,
+# broadcast targeting, favorites, and maintenance controls.
+# Still single-file + JSON only.
+# =========================================================
+
+BASE_DEFAULT_DATA = default_data
+BASE_NORMALIZE_DATA = normalize_data
+BASE_USER_KEYBOARD = user_keyboard
+BASE_ADMIN_KEYBOARD = admin_keyboard
+BASE_START = start
+BASE_SHOW_WALLET = show_wallet
+BASE_SHOW_ACCOUNT = show_account
+BASE_SHOW_MY_SERVICES = show_my_services
+BASE_SHOW_OWNED_SERVICE = show_owned_service
+BASE_VIEW_SERVICE = view_service
+BASE_BUY_WITH_WALLET = buy_with_wallet
+BASE_RENEW_SERVICE = renew_service
+BASE_SHOW_SHOP = show_shop
+BASE_ADMIN_CONFIGS_HOME = admin_configs_home
+BASE_ADMIN_CONFIGS_FREE = admin_configs_free
+BASE_ADMIN_CONFIGS_SOLD = admin_configs_sold
+BASE_ADMIN_REPORTS = admin_reports
+BASE_APPLY_DISCOUNT = apply_discount
+BASE_CALLBACK_HANDLER = callback_handler
+BASE_MESSAGE_HANDLER = message_handler
+
+
+def default_data():
+    d = BASE_DEFAULT_DATA()
+    d.setdefault("settings", {}).update({
+        "support_username": d.get("settings", {}).get("support_username", ""),
+        "admin_display_id": str(ADMIN_ID or ""),
+        "shop_title": "🛒 فروشگاه NovaLinkVPN",
+        "shop_description": "سرویس‌های موجود را انتخاب کن و خریدت را انجام بده.",
+        "maintenance_message": "🛠 ربات موقتاً در حال بروزرسانی است.",
+        "low_stock_threshold": 3,
+        "notification_retention_days": 30,
+        "max_ticket_open": 3,
+        "broadcast_delay": 0.05,
+        "purchase_confirmation": True,
+        "show_stock_to_users": True,
+    })
+    d.setdefault("topups", {})
+    d.setdefault("notifications", {})
+    d.setdefault("audit_logs", {})
+    d.setdefault("favorites", {})
+    return d
+
+
+def normalize_data():
+    BASE_NORMALIZE_DATA()
+    data.setdefault("topups", {})
+    data.setdefault("notifications", {})
+    data.setdefault("audit_logs", {})
+    data.setdefault("favorites", {})
+    s=data.setdefault("settings", {})
+    s.setdefault("admin_display_id", str(ADMIN_ID or ""))
+    s.setdefault("shop_title", "🛒 فروشگاه NovaLinkVPN")
+    s.setdefault("shop_description", "سرویس‌های موجود را انتخاب کن و خریدت را انجام بده.")
+    s.setdefault("maintenance_message", "🛠 ربات موقتاً در حال بروزرسانی است.")
+    s.setdefault("low_stock_threshold", 3)
+    s.setdefault("notification_retention_days", 30)
+    s.setdefault("max_ticket_open", 3)
+    s.setdefault("broadcast_delay", 0.05)
+    s.setdefault("purchase_confirmation", True)
+    s.setdefault("show_stock_to_users", True)
+    for u in data.get("users", {}).values():
+        u.setdefault("notification_ids", [])
+        u.setdefault("favorites", [])
+        u.setdefault("applied_discount", None)
+        u.setdefault("last_purchase_at", None)
+        u.setdefault("last_order_id", None)
+        u.setdefault("wallet_topup_ids", [])
+        u.setdefault("rewarded_referral", False)
+    for s in data.get("services", {}).values():
+        s.setdefault("category", "عمومی")
+        s.setdefault("priority", 0)
+        s.setdefault("badge", "")
+        s.setdefault("min_stock_alert_sent", False)
+
+
+def user_record(user_id):
+    return data.get("users", {}).get(str(user_id))
+
+
+def add_audit(admin_id, action, target="", details=""):
+    try:
+        rec = {
+            "id": uid("audit"),
+            "admin_id": int(admin_id),
+            "action": action,
+            "target": str(target),
+            "details": str(details),
+            "created_at": now_iso(),
+        }
+        data.setdefault("audit_logs", {})[rec["id"]] = rec
+        if len(data["audit_logs"]) > 5000:
+            old = sorted(data["audit_logs"].values(), key=lambda x: x.get("created_at", ""))[:500]
+            for x in old:
+                data["audit_logs"].pop(x["id"], None)
+    except Exception:
+        logger.exception("audit log failed")
+
+
+async def notify_user(context, user_id, title, text, kind="info"):
+    u = user_record(user_id)
+    if not u:
+        return
+    nid = uid("ntf")
+    data.setdefault("notifications", {})[nid] = {
+        "id": nid, "user_id": int(user_id), "title": title,
+        "text": text, "kind": kind, "read": False, "created_at": now_iso(),
+    }
+    u.setdefault("notification_ids", []).append(nid)
+    try:
+        await context.bot.send_message(chat_id=int(user_id), text=f"{title}\n\n{text}")
+    except Exception:
+        pass
+
+
+def unread_notifications(user_id):
+    return sum(1 for n in data.get("notifications", {}).values()
+               if n.get("user_id") == user_id and not n.get("read"))
+
+
+def cleanup_notifications():
+    days = int(data.get("settings", {}).get("notification_retention_days", 30))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    for nid, n in list(data.get("notifications", {}).items()):
+        dt=parse_dt(n.get("created_at"))
+        if dt and dt < cutoff:
+            data["notifications"].pop(nid, None)
+
+
+def available_shop_services():
+    out=[]
+    for s in data.get("services", {}).values():
+        if not s.get("active", True):
+            continue
+        if free_config_count(s) <= 0:
+            continue
+        out.append(s)
+    return sorted(out, key=lambda x: (-int(x.get("priority",0)), x.get("name","")))
+
+
+def calc_discount(user, plan):
+    code = user.get("applied_discount") if user else None
+    if not code:
+        return int(plan.get("price",0)), None, 0
+    d = data.get("discounts", {}).get(str(code).upper())
+    if not d or not d.get("active"):
+        return int(plan.get("price",0)), None, 0
+    exp=parse_dt(d.get("expires_at"))
+    if exp and datetime.now(timezone.utc) > exp:
+        return int(plan.get("price",0)), None, 0
+    max_uses=int(d.get("max_uses",0)); used=int(d.get("used",0))
+    if max_uses>0 and used>=max_uses:
+        return int(plan.get("price",0)), None, 0
+    price=int(plan.get("price",0)); typ=d.get("type","percent"); val=int(d.get("value",0))
+    if typ == "fixed":
+        discount=min(price,max(0,val))
+    else:
+        discount=min(price,max(0,price*val//100))
+    return price-discount, d, discount
+
+
+def user_keyboard():
+    unread=unread_notifications(getattr(user_keyboard, "current_user_id", 0)) if getattr(user_keyboard, "current_user_id", 0) else 0
+    label = f"🔔 اعلان‌ها ({unread})" if unread else "🔔 اعلان‌ها"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop"), InlineKeyboardButton("📦 سرویس‌های من", callback_data="my_services")],
+        [InlineKeyboardButton("👤 حساب کاربری", callback_data="account"), InlineKeyboardButton("💳 کیف پول", callback_data="wallet")],
+        [InlineKeyboardButton("🧾 سفارش‌ها", callback_data="orders"), InlineKeyboardButton(label, callback_data="notifications")],
+        [InlineKeyboardButton("🎁 کد تخفیف", callback_data="discount"), InlineKeyboardButton("⭐ دعوت دوستان", callback_data="referral")],
+        [InlineKeyboardButton("🎫 پشتیبانی", callback_data="support"), InlineKeyboardButton("📢 کانال", callback_data="channel")],
+    ])
+
+
+def admin_keyboard(role="owner"):
+    rows = [
+        [InlineKeyboardButton("📊 داشبورد", callback_data="admin_dashboard"), InlineKeyboardButton("👥 کاربران", callback_data="admin_users")],
+        [InlineKeyboardButton("📦 سرویس‌ها", callback_data="admin_services"), InlineKeyboardButton("🔑 مرکز کانفیگ", callback_data="admin_configs")],
+        [InlineKeyboardButton("🛒 سفارش‌ها", callback_data="admin_orders"), InlineKeyboardButton("💰 درخواست شارژ", callback_data="admin_topups")],
+        [InlineKeyboardButton("💳 تراکنش‌ها", callback_data="admin_transactions"), InlineKeyboardButton("🎁 تخفیف‌ها", callback_data="admin_discounts")],
+        [InlineKeyboardButton("⭐ دعوت‌ها", callback_data="admin_referral"), InlineKeyboardButton("🎫 پشتیبانی", callback_data="admin_support")],
+        [InlineKeyboardButton("📢 ارسال همگانی", callback_data="admin_broadcast"), InlineKeyboardButton("📈 گزارش‌های حرفه‌ای", callback_data="admin_reports_pro")],
+        [InlineKeyboardButton("💾 بکاپ / بازیابی", callback_data="admin_backup"), InlineKeyboardButton("⚙️ تنظیمات", callback_data="admin_settings")],
+    ]
+    if role == "owner":
+        rows.append([InlineKeyboardButton("🛡️ دسترسی مدیران", callback_data="admin_staff"), InlineKeyboardButton("🧾 لاگ مدیریت", callback_data="admin_audit")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    existed = str(update.effective_user.id) in data.get("users", {})
+    user = await ensure_user(update.effective_user)
+    user_keyboard.current_user_id = update.effective_user.id
+
+    # Referral capture only on first registration; self-referral is blocked.
+    payload = ""
+    try:
+        raw = (update.message.text or "").strip()
+        if raw.startswith("/start") and len(raw.split(maxsplit=1)) == 2:
+            payload = raw.split(maxsplit=1)[1].strip()
+    except Exception:
+        payload = ""
+    if (not existed) and payload.startswith("ref_"):
+        code = payload[4:].strip().upper()
+        referrer = next((x for x in data.get("users", {}).values() if x.get("referral_code", "").upper() == code), None)
+        if referrer and int(referrer.get("id")) != int(update.effective_user.id):
+            user["referred_by"] = int(referrer["id"])
+            rid = uid("ref")
+            data.setdefault("referrals", {})[rid] = {
+                "id": rid, "referrer_id": int(referrer["id"]),
+                "referred_user_id": int(update.effective_user.id),
+                "created_at": now_iso(), "rewarded": False,
+            }
+            await save_data()
+
+    if user.get("blocked") and not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ دسترسی شما به این ربات مسدود شده است.")
+        return
+    if data.get("settings", {}).get("maintenance") and not get_admin_role(update.effective_user.id):
+        await update.message.reply_text(data["settings"].get("maintenance_message", "🛠 ربات موقتاً در حال بروزرسانی است."))
+        return
+    await update.message.reply_text(
+        f"🚀 سلام {esc(user.get('first_name') or '')}!\n\nبه {BRAND} خوش اومدی 💙\n\n"
+        "پنل سرویس‌ها، کیف پول و پشتیبانی از منوی زیر در دسترسه:",
+        reply_markup=user_keyboard(),
+    )
+
+
+async def show_wallet(query, user_id):
+    u=user_record(user_id)
+    pending=sum(1 for x in data.get("topups",{}).values() if x.get("user_id")==user_id and x.get("status")=="pending")
+    admin_id=data.get("settings",{}).get("admin_display_id") or str(ADMIN_ID)
+    support=data.get("settings",{}).get("support_username","").strip().lstrip("@")
+    rows=[[InlineKeyboardButton("➕ افزایش موجودی", callback_data="wallet_topup")],
+          [InlineKeyboardButton("🧾 تاریخچه تراکنش‌ها", callback_data="transactions")]]
+    if pending:
+        rows.append([InlineKeyboardButton(f"⏳ درخواست‌های در انتظار ({pending})", callback_data="topup_mystatus")])
+    rows.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")])
+    contact = f"@{support}" if support else f"آیدی عددی مدیریت: {admin_id}"
+    await query.edit_message_text(
+        f"💳 کیف پول\n\n💰 موجودی: {money(u.get('balance',0))} تومان\n\n"
+        "➕ افزایش موجودی آنلاین در نسخه فعلی به درگاه متصل نشده است.\n"
+        "در نسخه بعدی امکان اتصال مستقیم به درگاه پرداخت فراهم می‌شود.\n\n"
+        f"📞 برای شارژ دستی فعلاً با مدیریت ارتباط بگیر:\n{contact}\n🆔 ID: <code>{esc(admin_id)}</code>",
+        reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
+
+
+async def show_notifications(query, user_id):
+    items=[n for n in data.get("notifications",{}).values() if n.get("user_id")==user_id]
+    items=sorted(items,key=lambda x:x.get("created_at",""),reverse=True)[:20]
+    for n in items:
+        n["read"]=True
+    if not items:
+        text="🔔 اعلان‌ها\n\nاعلان جدیدی نداری."
+    else:
+        chunks=[]
+        for n in items:
+            chunks.append(f"• {esc(n.get('title','اعلان'))}\n{esc(n.get('text',''))}\n🕒 {esc(n.get('created_at',''))}")
+        text="🔔 اعلان‌ها\n\n"+"\n\n".join(chunks)
+    await save_data()
+    user_keyboard.current_user_id=user_id
+    await query.edit_message_text(text, reply_markup=back_home(), parse_mode="HTML")
+
+
+async def show_orders(query,user_id):
+    u=user_record(user_id)
+    ids=u.get("order_ids",[]) if u else []
+    orders=[data["orders"].get(i) for i in ids if data["orders"].get(i)]
+    orders=sorted(orders,key=lambda x:x.get("created_at",""),reverse=True)[:30]
+    if not orders:
+        await query.edit_message_text("🧾 هنوز سفارشی ثبت نشده است.",reply_markup=back_home())
+        return
+    rows=[]
+    for o in orders:
+        status={"paid":"✅ پرداخت‌شده","pending":"⏳ در انتظار","failed":"❌ ناموفق","refunded":"↩️ برگشت"}.get(o.get("status"),o.get("status"))
+        rows.append([InlineKeyboardButton(f"{status} | {money(o.get('amount',0))} تومان",callback_data=f"order_view:{o['id']}")])
+    rows.append([InlineKeyboardButton("🔙 منوی اصلی",callback_data="home")])
+    await query.edit_message_text("🧾 تاریخچه سفارش‌ها\n\nسفارش را انتخاب کن:",reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def show_order_detail(query, order_id):
+    o=data.get("orders",{}).get(order_id)
+    if not o or o.get("user_id")!=query.from_user.id:
+        await query.answer("دسترسی ندارید.",show_alert=True); return
+    await query.edit_message_text(
+        f"🧾 سفارش {esc(order_id)}\n\n📦 پلن: {esc(data.get('services',{}).get(o.get('service_id'),{}).get('name','-'))}\n"
+        f"💰 مبلغ: {money(o.get('amount',0))} تومان\n📌 وضعیت: {esc(o.get('status','-'))}\n"
+        f"💳 پرداخت: {esc(o.get('payment_method','-'))}\n🕒 زمان: {esc(o.get('created_at','-'))}",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 سفارش‌ها",callback_data="orders")],[InlineKeyboardButton("🏠 خانه",callback_data="home")]])
+    )
+
+
+async def wallet_topup_start(query, context):
+    context.user_data["state"]="wallet_topup_amount"
+    admin_id=data.get("settings",{}).get("admin_display_id") or str(ADMIN_ID)
+    await query.edit_message_text(
+        "➕ درخواست افزایش موجودی\n\nمبلغ موردنظر را به تومان بفرست.\n"
+        f"🆔 بعد از ارسال، درخواست برای مدیریت با ID {admin_id} ثبت می‌شود.\n\n/cancel برای لغو",
+        reply_markup=back_home())
+
+
+async def topup_mystatus(query,user_id):
+    reqs=[x for x in data.get("topups",{}).values() if x.get("user_id")==user_id]
+    reqs=sorted(reqs,key=lambda x:x.get("created_at",""),reverse=True)[:10]
+    if not reqs:
+        text="💰 هیچ درخواست شارژی ثبت نشده است."
+    else:
+        labels={"pending":"⏳ در انتظار","approved":"✅ تایید","rejected":"❌ رد شده"}
+        text="💰 درخواست‌های شارژ\n\n"+"\n".join(f"• {money(x.get('amount',0))} تومان | {labels.get(x.get('status'),x.get('status'))} | {x.get('created_at','')}" for x in reqs)
+    await query.edit_message_text(text,reply_markup=back_home())
+
+
+async def admin_topups(query):
+    if not can_manage_finance(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_admin()); return
+    reqs=sorted(data.get("topups",{}).values(),key=lambda x:x.get("created_at",""),reverse=True)
+    pending=[x for x in reqs if x.get("status")=="pending"]
+    total=sum(int(x.get("amount",0)) for x in reqs if x.get("status")=="approved")
+    rows=[[InlineKeyboardButton(f"⏳ در انتظار: {len(pending)}",callback_data="admin_topups_pending")]]
+    for r in pending[:20]:
+        rows.append([InlineKeyboardButton(f"👤 {r.get('user_id')} | {money(r.get('amount',0))} تومان",callback_data=f"topup_view:{r['id']}")])
+    rows.append([InlineKeyboardButton("🔙 پنل مدیریت",callback_data="admin_home")])
+    await query.edit_message_text(f"💰 مدیریت درخواست‌های شارژ\n\n✅ مجموع تاییدشده: {money(total)} تومان\n📥 کل در انتظار: {len(pending)}",reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def admin_topup_view(query,topup_id):
+    if not can_manage_finance(query.from_user.id):
+        await query.answer("دسترسی ندارید.",show_alert=True); return
+    r=data.get("topups",{}).get(topup_id)
+    if not r:
+        await query.edit_message_text("❌ درخواست پیدا نشد.",reply_markup=back_admin()); return
+    status=r.get("status")
+    buttons=[]
+    if status=="pending":
+        buttons=[[InlineKeyboardButton("✅ تایید و شارژ",callback_data=f"topup_approve:{topup_id}")],[InlineKeyboardButton("❌ رد درخواست",callback_data=f"topup_reject:{topup_id}")]]
+    buttons.append([InlineKeyboardButton("🔙 درخواست‌ها",callback_data="admin_topups")])
+    await query.edit_message_text(
+        f"💰 درخواست شارژ\n\n🆔 درخواست: {esc(topup_id)}\n👤 کاربر: <code>{r.get('user_id')}</code>\n"
+        f"💵 مبلغ: {money(r.get('amount',0))} تومان\n📌 وضعیت: {esc(status or '-') }\n🕒 زمان: {esc(r.get('created_at','-'))}",
+        reply_markup=InlineKeyboardMarkup(buttons),parse_mode="HTML")
+
+
+async def approve_topup(query, context, topup_id, approved):
+    if not can_manage_finance(query.from_user.id):
+        await query.answer("دسترسی ندارید.",show_alert=True); return
+    r=data.get("topups",{}).get(topup_id)
+    if not r or r.get("status")!="pending":
+        await query.answer("این درخواست قبلاً پردازش شده.",show_alert=True); return
+    r["status"]="approved" if approved else "rejected"
+    r["processed_at"]=now_iso(); r["processed_by"]=query.from_user.id
+    user=user_record(r.get("user_id"))
+    if approved and user:
+        amount=max(0,int(r.get("amount",0)))
+        user["balance"]=int(user.get("balance",0))+amount
+        txid=uid("tx")
+        data["transactions"][txid]={"id":txid,"user_id":int(r["user_id"]),"type":"wallet_topup","amount":amount,"description":"افزایش موجودی تاییدشده توسط مدیریت","created_at":now_iso(),"reference":topup_id}
+        user.setdefault("transaction_ids",[]).append(txid)
+        await notify_user(context,r["user_id"],"✅ افزایش موجودی تایید شد",f"مبلغ {money(amount)} تومان به کیف پول اضافه شد.","wallet")
+    else:
+        await notify_user(context,r["user_id"],"❌ درخواست افزایش موجودی رد شد","درخواست شارژ شما توسط مدیریت رد شد. برای پیگیری با مدیریت ارتباط بگیر.","wallet")
+    add_audit(query.from_user.id,"topup_approved" if approved else "topup_rejected",topup_id)
+    await save_data()
+    await query.answer("انجام شد ✅")
+    await admin_topups(query)
+
+
+async def show_shop(query):
+    services=available_shop_services()
+    if not services:
+        await query.edit_message_text(
+            f"{data.get('settings',{}).get('shop_title','🛒 فروشگاه')}\n\n"
+            "😔 فعلاً هیچ پلن آماده فروشی وجود ندارد.\n\n"
+            "موجودی فروش به‌صورت زنده بررسی می‌شود؛ وقتی کانفیگ شارژ شود، پلن دوباره در فروشگاه ظاهر خواهد شد.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 بروزرسانی",callback_data="shop")],[InlineKeyboardButton("🏠 منوی اصلی",callback_data="home")]])
+        ); return
+    groups={}
+    for s in services: groups.setdefault(s.get("category","عمومی"),[]).append(s)
+    rows=[]
+    for cat,items in groups.items():
+        rows.append([InlineKeyboardButton(f"📂 {cat}",callback_data=f"shop_category:{cat[:35]}")])
+        for s in items[:30]:
+            stock=free_config_count(s)
+            badge=(s.get("badge") or "").strip()
+            label=f"🟢 {badge+' ' if badge else ''}{s.get('name','پلن')} • {money(s.get('price',0))} تومان"
+            if data.get("settings",{}).get("show_stock_to_users",True): label += f" • {stock} موجود"
+            rows.append([InlineKeyboardButton(label,callback_data=f"view_service:{s['id']}")])
+    rows.append([InlineKeyboardButton("🔄 بروزرسانی",callback_data="shop"),InlineKeyboardButton("🏠 خانه",callback_data="home")])
+    await query.edit_message_text(
+        f"{data.get('settings',{}).get('shop_title','🛒 فروشگاه NovaLinkVPN')}\n\n"
+        f"{esc(data.get('settings',{}).get('shop_description',''))}\n\n✅ فقط پلن‌های دارای کانفیگ آزاد نمایش داده می‌شوند.",
+        reply_markup=InlineKeyboardMarkup(rows),parse_mode="HTML")
+
+
+async def shop_category(query,category):
+    items=[s for s in available_shop_services() if s.get("category","عمومی")[:35]==category]
+    if not items:
+        await query.edit_message_text("❌ در این دسته پلن موجود نیست.",reply_markup=back_home()); return
+    rows=[]
+    for s in items:
+        stock=free_config_count(s)
+        rows.append([InlineKeyboardButton(f"🟢 {s.get('name')} • {money(s.get('price',0))} تومان • {stock}",callback_data=f"view_service:{s['id']}")])
+    rows.append([InlineKeyboardButton("🔙 فروشگاه",callback_data="shop")])
+    await query.edit_message_text(f"📂 {esc(category)}\n\nپلن موردنظر را انتخاب کن:",reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def view_service(query, service_id):
+    service=data.get("services",{}).get(service_id)
+    if not service or not service.get("active",True) or free_config_count(service)<=0:
+        await query.edit_message_text("❌ این پلن در حال حاضر موجود نیست.",reply_markup=back_home()); return
+    user=user_record(query.from_user.id); net,d,disc=calc_discount(user,service)
+    stock=free_config_count(service)
+    text=(f"📦 {esc(service.get('name',''))}\n\n📂 دسته: {esc(service.get('category','عمومی'))}\n"
+          f"💾 حجم: {service.get('traffic_gb',0)} GB\n🌍 سرور: {esc(service.get('server','-'))}\n"
+          f"⏳ مدت: {service.get('duration_days',0)} روز\n💰 قیمت اصلی: {money(service.get('price',0))} تومان\n")
+    if d:
+        text += f"🎁 تخفیف {esc(d.get('code',''))}: -{money(disc)} تومان\n💵 قیمت نهایی: {money(net)} تومان\n"
+    if data.get("settings",{}).get("show_stock_to_users",True): text+=f"📦 موجودی: {stock} عدد\n"
+    text += f"\nℹ️ {esc(service.get('description',''))}\n\n⚡ قبل از پرداخت، اطلاعات سفارش را یک‌بار بررسی کن."
+    await query.edit_message_text(text,reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ ادامه و پرداخت",callback_data=f"confirm_buy:{service_id}")],
+        [InlineKeyboardButton("❤️ افزودن به علاقه‌مندی",callback_data=f"favorite:{service_id}")],
+        [InlineKeyboardButton("🔙 فروشگاه",callback_data="shop")]
+    ]),parse_mode="HTML")
+
+
+async def confirm_buy(query, service_id):
+    service=data.get("services",{}).get(service_id); user=user_record(query.from_user.id)
+    if not service or not user or not service.get("active",True) or free_config_count(service)<=0:
+        await query.edit_message_text("❌ این پلن دیگر موجود نیست.",reply_markup=back_home()); return
+    net,d,disc=calc_discount(user,service)
+    await query.edit_message_text(
+        f"🧾 تایید نهایی خرید\n\n📦 {esc(service.get('name',''))}\n💰 مبلغ قابل پرداخت: {money(net)} تومان\n"
+        f"💳 موجودی کیف پول: {money(user.get('balance',0))} تومان\n📦 موجودی کانفیگ: {free_config_count(service)}\n\n"
+        "با تایید، مبلغ از کیف پول کسر و یک کانفیگ اختصاصی تحویل داده می‌شود.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 تایید خرید",callback_data=f"buy_wallet:{service_id}")],[InlineKeyboardButton("❌ لغو",callback_data=f"view_service:{service_id}")]]))
+
+
+async def buy_with_wallet(query,user_id,service_id):
+    user=user_record(user_id); plan=data.get("services",{}).get(service_id)
+    if not user or not plan or not plan.get("active",True):
+        await query.edit_message_text("❌ سرویس قابل خرید نیست.",reply_markup=back_home()); return
+    if free_config_count(plan)<=0:
+        await query.edit_message_text("❌ موجودی کانفیگ این پلن تمام شده است.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 فروشگاه",callback_data="shop")],[InlineKeyboardButton("🏠 خانه",callback_data="home")]])); return
+    final_price,discount,discount_amount=calc_discount(user,plan)
+    if user.get("balance",0)<final_price:
+        await query.edit_message_text(f"❌ موجودی کافی نیست.\n\n💰 قیمت نهایی: {money(final_price)} تومان\n💳 موجودی: {money(user.get('balance',0))} تومان",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 کیف پول",callback_data="wallet")],[InlineKeyboardButton("🛒 فروشگاه",callback_data="shop")]])); return
+    owned_id=uid("svc"); order_id=uid("ord"); config_item=None
+    normalize_service_inventory(plan)
+    for item in plan["config_pool"]:
+        if item.get("status")=="free" and item.get("config"):
+            config_item=item; break
+    if not config_item:
+        await query.edit_message_text("❌ کانفیگ قابل تخصیص پیدا نشد.",reply_markup=back_home()); return
+    # Atomic-ish JSON operation: reserve config first, then charge. Rollback on failure.
+    before_balance=int(user.get("balance",0)); before_status=config_item.get("status")
+    try:
+        config_item["status"]="assigned"; config_item["assigned_to"]=user_id; config_item["assigned_service_id"]=owned_id; config_item["assigned_at"]=now_iso()
+        user["balance"]=before_balance-final_price
+        expires=datetime.now(timezone.utc)+timedelta(days=int(plan.get("duration_days",30)))
+        owned={"id":owned_id,"user_id":user_id,"plan_id":service_id,"plan_name":plan.get("name",""),"traffic_gb":plan.get("traffic_gb",0),"server":plan.get("server",""),"config":config_item.get("config"),"config_item_id":config_item.get("id"),"created_at":now_iso(),"expires_at":expires.isoformat(),"status":"active","traffic_used_gb":0,"category":plan.get("category","عمومی")}
+        order={"id":order_id,"user_id":user_id,"service_id":service_id,"amount":final_price,"original_amount":int(plan.get("price",0)),"discount_code":discount.get("code") if discount else None,"discount_amount":discount_amount,"status":"paid","created_at":now_iso(),"payment_method":"wallet"}
+        txid=uid("tx")
+        tx={"id":txid,"user_id":user_id,"type":"purchase","amount":-final_price,"description":f"خرید {plan.get('name','')}","created_at":now_iso(),"reference":order_id}
+        data["services"][owned_id]=owned; data["orders"][order_id]=order; data["transactions"][txid]=tx
+        user.setdefault("service_ids",[]).append(owned_id); user.setdefault("order_ids",[]).append(order_id); user.setdefault("transaction_ids",[]).append(txid)
+        user["last_purchase_at"]=now_iso(); user["last_order_id"]=order_id
+        if discount:
+            discount["used"]=int(discount.get("used",0))+1; user["applied_discount"]=None
+        data["stats"]["total_sales"]=int(data["stats"].get("total_sales",0))+1
+        data["stats"]["total_revenue"]=int(data["stats"].get("total_revenue",0))+final_price
+
+        # Reward the referrer exactly once, after the referred user's first paid order.
+        if not user.get("rewarded_referral") and user.get("referred_by"):
+            referrer=data.get("users",{}).get(str(user.get("referred_by")))
+            reward=int(data.get("settings",{}).get("referral_reward",0))
+            if referrer and reward>0:
+                referrer["balance"]=int(referrer.get("balance",0))+reward
+                referrer.setdefault("points",0)
+                txr=uid("tx")
+                data["transactions"][txr]={"id":txr,"user_id":int(referrer["id"]),"type":"referral_reward","amount":reward,"description":"پاداش اولین خرید دعوت‌شده","created_at":now_iso(),"reference":order_id}
+                referrer.setdefault("transaction_ids",[]).append(txr)
+                user["rewarded_referral"]=True
+                for rr in data.get("referrals",{}).values():
+                    if rr.get("referred_user_id")==user_id and not rr.get("rewarded"):
+                        rr["rewarded"]=True; rr["rewarded_at"]=now_iso(); rr["reward"] = reward
+                        break
+        await save_data()
+    except Exception:
+        user["balance"]=before_balance; config_item["status"]=before_status; config_item["assigned_to"]=None; config_item["assigned_service_id"]=None; config_item["assigned_at"]=None
+        for k in (owned_id,): data["services"].pop(k,None)
+        data["orders"].pop(order_id,None)
+        await save_data()
+        await query.edit_message_text("❌ خطای داخلی در ثبت خرید؛ مبلغ محفوظ ماند.",reply_markup=back_home()); return
+    user_keyboard.current_user_id=user_id
+    await query.edit_message_text(
+        f"✅ خرید با موفقیت انجام شد!\n\n📦 سرویس: {esc(plan.get('name',''))}\n💰 مبلغ: {money(final_price)} تومان\n"
+        f"⏳ انقضا: {expires.strftime('%Y-%m-%d')}\n🧾 سفارش: <code>{esc(order_id)}</code>\n\n🔑 کانفیگ اختصاصی تو:\n\n<code>{esc(config_item.get('config',''))}</code>",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 سرویس‌های من",callback_data="my_services")],[InlineKeyboardButton("🧾 جزئیات سفارش",callback_data=f"order_view:{order_id}")],[InlineKeyboardButton("🏠 خانه",callback_data="home")]]),parse_mode="HTML")
+
+
+async def apply_discount(update, code):
+    user=user_record(update.effective_user.id); d=data.get("discounts",{}).get(code.upper())
+    if not user or not d or not d.get("active"):
+        await update.message.reply_text("❌ کد تخفیف معتبر نیست.",reply_markup=user_keyboard()); return
+    exp=parse_dt(d.get("expires_at"))
+    if exp and datetime.now(timezone.utc)>exp:
+        d["active"]=False; await save_data(); await update.message.reply_text("❌ تاریخ این کد گذشته است.",reply_markup=user_keyboard()); return
+    max_uses=int(d.get("max_uses",0)); used=int(d.get("used",0))
+    if max_uses>0 and used>=max_uses:
+        await update.message.reply_text("❌ ظرفیت استفاده از این کد تمام شده است.",reply_markup=user_keyboard()); return
+    user["applied_discount"]=d.get("code",code.upper())
+    await save_data()
+    await update.message.reply_text(f"✅ کد {esc(user['applied_discount'])} آماده استفاده شد.\nدر خرید بعدی تخفیف محاسبه می‌شود.",reply_markup=user_keyboard(),parse_mode="HTML")
+
+
+async def favorite_toggle(query, service_id):
+    u=user_record(query.from_user.id); s=data.get("services",{}).get(service_id)
+    if not u or not s:
+        await query.answer("پلن پیدا نشد.",show_alert=True); return
+    fav=u.setdefault("favorites",[])
+    if service_id in fav:
+        fav.remove(service_id); msg="از علاقه‌مندی حذف شد."
+    else:
+        fav.append(service_id); msg="به علاقه‌مندی اضافه شد."
+    await save_data(); await query.answer(msg,show_alert=True)
+
+
+async def show_account(query,user_id):
+    u=user_record(user_id)
+    active=sum(1 for sid in u.get("service_ids",[]) if data.get("services",{}).get(sid,{}).get("status")=="active")
+    fav=len(u.get("favorites",[])); unread=unread_notifications(user_id)
+    await query.edit_message_text(
+        f"👤 حساب کاربری\n\n🆔 ID: <code>{user_id}</code>\n"
+        f"👤 نام: {esc(u.get('first_name') or '-') }\n📦 سرویس‌های فعال: {active}\n💳 موجودی: {money(u.get('balance',0))} تومان\n"
+        f"⭐ امتیاز: {u.get('points',0)}\n❤️ علاقه‌مندی‌ها: {fav}\n🔔 اعلان خوانده‌نشده: {unread}\n🗓 عضویت: {esc(u.get('created_at','-'))}",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧾 سفارش‌ها",callback_data="orders"),InlineKeyboardButton("🔔 اعلان‌ها",callback_data="notifications")],[InlineKeyboardButton("🔙 خانه",callback_data="home")]]),parse_mode="HTML")
+
+
+
+async def show_owned_service(query, service_id):
+    service=data.get("services",{}).get(service_id)
+    if not service or service.get("user_id") != query.from_user.id:
+        await query.edit_message_text("❌ این سرویس متعلق به حساب شما نیست.",reply_markup=back_home()); return
+    expires=parse_dt(service.get("expires_at"))
+    now=datetime.now(timezone.utc)
+    if expires and expires <= now and service.get("status") != "expired":
+        service["status"]="expired"
+        await save_data()
+    status="🟢 فعال" if service.get("status")=="active" and (not expires or expires>now) else "🔴 منقضی"
+    remaining="-"
+    if expires:
+        sec=max(0,int((expires-now).total_seconds())); days=sec//86400; hours=(sec%86400)//3600
+        remaining=f"{days} روز و {hours} ساعت"
+    await query.edit_message_text(
+        f"📦 {esc(service.get('plan_name','سرویس'))}\n\n"
+        f"📡 وضعیت: {status}\n💾 حجم: {service.get('traffic_gb',0)} GB\n"
+        f"📊 مصرف ثبت‌شده: {service.get('traffic_used_gb',0)} GB\n🌍 سرور: {esc(service.get('server','-'))}\n"
+        f"⏳ انقضا: {expires.strftime('%Y-%m-%d %H:%M') if expires else '-'}\n⏱ باقی‌مانده: {remaining}\n\n"
+        f"🔑 کانفیگ اختصاصی:\n<code>{esc(service.get('config') or 'ثبت نشده')}</code>",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 تمدید",callback_data=f"renew:{service_id}"),InlineKeyboardButton("📋 دریافت کانفیگ",callback_data=f"send_config:{service_id}")],
+            [InlineKeyboardButton("🧾 سفارش مرتبط",callback_data=f"orders")],
+            [InlineKeyboardButton("📦 سرویس‌های من",callback_data="my_services")]
+        ]),parse_mode="HTML")
+
+
+async def admin_reports_pro(query):
+    if not can_admin(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_admin()); return
+    now=datetime.now(timezone.utc); day=now-timedelta(days=1); week=now-timedelta(days=7); month=now-timedelta(days=30)
+    orders=list(data.get("orders",{}).values()); users=list(data.get("users",{}).values()); txs=list(data.get("transactions",{}).values())
+    paid=[o for o in orders if o.get("status")=="paid"]
+    def period(p):
+        dt=parse_dt(p.get("created_at")); return dt
+    rev=lambda start: sum(int(o.get("amount",0)) for o in paid if (period(o) and period(o)>=start))
+    sales=lambda start: sum(1 for o in paid if (period(o) and period(o)>=start))
+    active_services=sum(1 for s in data.get("services",{}).values() if s.get("user_id") and s.get("status")=="active")
+    stocks=[]
+    for s in data.get("services",{}).values():
+        if "config_pool" in s and s.get("name"):
+            stocks.append((s.get("name"),free_config_count(s)))
+    low=[f"• {esc(n)}: {c}" for n,c in stocks if c<=int(data.get("settings",{}).get("low_stock_threshold",3))]
+    text=("📈 گزارش حرفه‌ای NovaLinkVPN\n\n"
+          f"👥 کاربران: {len(users)}\n🧑‍💻 کاربران فعال 24h: {sum(1 for u in users if (parse_dt(u.get('last_seen')) or now)<now and (parse_dt(u.get('last_seen')) or now)>=day)}\n"
+          f"📦 سرویس‌های فعال کاربری: {active_services}\n\n"
+          f"💰 فروش 24h: {money(rev(day))} تومان | {sales(day)} سفارش\n"
+          f"💰 فروش 7d: {money(rev(week))} تومان | {sales(week)} سفارش\n"
+          f"💰 فروش 30d: {money(rev(month))} تومان | {sales(month)} سفارش\n\n"
+          f"🎫 تیکت باز: {sum(1 for t in data.get('tickets',{}).values() if t.get('status')=='open')}\n"
+          f"💰 درخواست شارژ در انتظار: {sum(1 for x in data.get('topups',{}).values() if x.get('status')=='pending')}\n\n"
+          "⚠️ موجودی پایین:\n"+("\n".join(low) if low else "✅ موردی نیست"))
+    await query.edit_message_text(text,reply_markup=back_admin(),parse_mode="HTML")
+
+
+async def admin_audit(query):
+    if not is_owner(query.from_user.id):
+        await query.edit_message_text("⛔ فقط Owner.",reply_markup=back_admin()); return
+    logs=sorted(data.get("audit_logs",{}).values(),key=lambda x:x.get("created_at",""),reverse=True)[:30]
+    if not logs: text="🧾 هنوز لاگ مدیریتی ثبت نشده است."
+    else: text="🧾 لاگ مدیریت\n\n"+"\n".join(f"• {x.get('action')} | {x.get('admin_id')} | {x.get('target')} | {x.get('created_at')}" for x in logs)
+    await query.edit_message_text(text,reply_markup=back_admin())
+
+
+async def admin_configs_home(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_admin()); return
+    total=free=sold=0
+    low=[]
+    for s in data.get("services",{}).values():
+        if "config_pool" not in s: continue
+        f=free_config_count(s); t=total_config_count(s); total+=t; free+=f; sold+=t-f
+        if f<=int(data.get("settings",{}).get("low_stock_threshold",3)): low.append(f"• {s.get('name','-')}: {f}")
+    await query.edit_message_text(
+        "🔑 مرکز مدیریت کانفیگ\n\n"
+        f"📦 کل کانفیگ‌ها: {total}\n🟢 آماده فروش: {free}\n🔴 فروخته/اختصاص‌یافته: {sold}\n⚠️ کم‌موجودی: {len(low)}\n\n"
+        "کانفیگ‌های آماده فروش را از کانفیگ‌های تحویل‌شده جدا نگه دار.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🟢 کانفیگ‌های آماده فروش",callback_data="config_free" )],
+            [InlineKeyboardButton("🔴 کانفیگ‌های فروخته‌شده",callback_data="config_sold")],
+            [InlineKeyboardButton("🔎 جستجوی کانفیگ",callback_data="config_search")],
+            [InlineKeyboardButton("🔄 بروزرسانی موجودی",callback_data="admin_configs")],
+            [InlineKeyboardButton("🔙 پنل مدیریت",callback_data="admin_home")]
+        ]))
+
+
+async def admin_configs_free(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_admin()); return
+    lines=[]
+    for s in data.get("services",{}).values():
+        free_items=[x for x in s.get("config_pool",[]) if x.get("status")=="free"]
+        if not free_items: continue
+        lines.append(f"📦 {s.get('name','-')} | 🟢 {len(free_items)}")
+        for x in free_items[:8]: lines.append(f"  • {x.get('id')} | {mask_config(x.get('config',''))}")
+    text="🟢 کانفیگ‌های آماده فروش\n\n"+("\n".join(lines) if lines else "هیچ کانفیگ آزادی موجود نیست.")
+    await query.edit_message_text(text,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔑 مرکز کانفیگ",callback_data="admin_configs")],[InlineKeyboardButton("📋 بکاپ",callback_data="admin_backup")]]) )
+
+
+async def admin_configs_sold(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_admin()); return
+    rows=[]
+    for sid,s in data.get("services",{}).items():
+        for x in s.get("config_pool",[]):
+            if x.get("status")=="assigned":
+                rows.append((x.get("assigned_at", ""),s,x))
+    rows=sorted(rows,key=lambda z:z[0],reverse=True)[:60]
+    if not rows: text="🔴 هنوز هیچ کانفیگی فروخته/اختصاص داده نشده است."
+    else:
+        chunks=[]
+        for dt,s,x in rows:
+            chunks.append(f"📦 {esc(s.get('name','-'))}\n👤 {x.get('assigned_to')}\n🔑 {x.get('id')} | {mask_config(x.get('config',''))}\n🕒 {dt}")
+        text="🔴 کانفیگ‌های فروخته‌شده\n\n"+"\n\n".join(chunks)
+    await query.edit_message_text(text,reply_markup=back_admin(),parse_mode="HTML")
+
+
+async def config_search_start(query,context):
+    context.user_data["state"]="config_search"
+    await query.edit_message_text("🔎 ID کانفیگ، بخشی از خود کانفیگ یا Telegram ID خریدار را بفرست.",reply_markup=back_admin())
+
+
+async def handle_config_search(update,text):
+    q=text.strip().lower(); rows=[]
+    for s in data.get("services",{}).values():
+        for x in s.get("config_pool",[]):
+            blob=" ".join([str(x.get("id","")),str(x.get("assigned_to","")),str(x.get("config",""))]).lower()
+            if q in blob:
+                rows.append(f"📦 {s.get('name','-')} | {x.get('id')} | {'🟢 آزاد' if x.get('status')=='free' else '🔴 اختصاص‌یافته'} | {mask_config(x.get('config',''))}")
+    rows=rows[:50]
+    context=update.message
+    await update.message.reply_text("🔎 نتیجه جستجو\n\n"+("\n".join(rows) if rows else "❌ چیزی پیدا نشد."),reply_markup=back_admin())
+
+
+async def add_topup_request(update,amount,context):
+    uid_=update.effective_user.id; amount=int(amount)
+    if amount<1000 or amount>1000000000:
+        await update.message.reply_text("❌ مبلغ باید بین 1,000 تا 1,000,000,000 تومان باشد."); return
+    existing=sum(1 for x in data.get("topups",{}).values() if x.get("user_id")==uid_ and x.get("status")=="pending")
+    if existing>=3:
+        await update.message.reply_text("⏳ چند درخواست در انتظار داری. لطفاً تا بررسی آنها صبر کن."); context.user_data.clear(); return
+    tid=uid("topup")
+    r={"id":tid,"user_id":uid_,"amount":amount,"status":"pending","created_at":now_iso()}
+    data.setdefault("topups",{})[tid]=r
+    user_record(uid_).setdefault("wallet_topup_ids",[]).append(tid)
+    add_audit(uid_,"topup_requested",tid,f"amount={amount}") if is_owner(uid_) else None
+    await save_data(); context.user_data.clear()
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(chat_id=ADMIN_ID,text=f"💰 درخواست شارژ جدید\n\n👤 کاربر: {uid_}\n💵 مبلغ: {money(amount)} تومان\n🆔 {tid}",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔎 بررسی در پنل",callback_data=f"topup_view:{tid}")]]))
+        except Exception: pass
+    await update.message.reply_text(f"✅ درخواست شارژ ثبت شد.\n\n💵 مبلغ: {money(amount)} تومان\n🆔 درخواست: {tid}\n\nپس از تایید مدیریت، موجودی کیف پولت افزایش پیدا می‌کند.",reply_markup=user_keyboard())
+
+
+async def admin_broadcast_menu(query,context):
+    if not can_broadcast(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_admin()); return
+    await query.edit_message_text("📢 انتخاب گروه ارسال",reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 همه کاربران",callback_data="broadcast_target:all")],
+        [InlineKeyboardButton("🟢 کاربران دارای سرویس فعال",callback_data="broadcast_target:active")],
+        [InlineKeyboardButton("⏳ نزدیک انقضا",callback_data="broadcast_target:expiring")],
+        [InlineKeyboardButton("🔙 پنل مدیریت",callback_data="admin_home")]
+    ]))
+
+
+async def broadcast_target_start(query,context,target):
+    context.user_data["state"]=f"broadcast_text:{target}"
+    await query.edit_message_text(f"📢 متن ارسال برای گروه «{target}» را بفرست.\n\n/cancel برای لغو",reply_markup=back_admin())
+
+
+async def run_targeted_broadcast(update,text,context,target):
+    now=datetime.now(timezone.utc); ids=[]
+    for u in data.get("users",{}).values():
+        if u.get("blocked"): continue
+        if target=="all": ok=True
+        elif target=="active": ok=any(data.get("services",{}).get(sid,{}).get("status")=="active" for sid in u.get("service_ids",[]))
+        else:
+            ok=False
+            for sid in u.get("service_ids",[]):
+                s=data.get("services",{}).get(sid,{})
+                exp=parse_dt(s.get("expires_at"));
+                if exp and now<=exp<=now+timedelta(days=7): ok=True; break
+        if ok: ids.append(int(u["id"]))
+    bid=uid("broadcast"); data.setdefault("broadcasts",{})[bid]={"id":bid,"admin_id":update.effective_user.id,"text":text,"target":target,"created_at":now_iso(),"sent":0,"failed":0}
+    await save_data(); sent=failed=0
+    for cid in ids:
+        try:
+            await context.bot.send_message(chat_id=cid,text=text); sent+=1
+        except Exception: failed+=1
+        await asyncio.sleep(float(data.get("settings",{}).get("broadcast_delay",0.05)))
+    data["broadcasts"][bid]["sent"]=sent; data["broadcasts"][bid]["failed"]=failed
+    add_audit(update.effective_user.id,"broadcast",bid,f"target={target},sent={sent},failed={failed}")
+    await save_data()
+    await update.message.reply_text(f"✅ ارسال تمام شد.\n\n📨 موفق: {sent}\n❌ ناموفق: {failed}",reply_markup=admin_keyboard(get_admin_role(update.effective_user.id)))
+
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    u=await ensure_user(q.from_user); user_keyboard.current_user_id=q.from_user.id
+    if u.get("blocked") and not is_owner(q.from_user.id):
+        await q.edit_message_text("⛔ دسترسی شما مسدود است."); return
+    k=q.data or ""
+    if k=="wallet_topup": return await wallet_topup_start(q,context)
+    if k=="topup_mystatus": return await topup_mystatus(q,q.from_user.id)
+    if k=="notifications": return await show_notifications(q,q.from_user.id)
+    if k=="orders": return await show_orders(q,q.from_user.id)
+    if k.startswith("order_view:"): return await show_order_detail(q,k.split(":",1)[1])
+    if k.startswith("favorite:"): return await favorite_toggle(q,k.split(":",1)[1])
+    if k.startswith("shop_category:"): return await shop_category(q,k.split(":",1)[1])
+    if k.startswith("confirm_buy:"): return await confirm_buy(q,k.split(":",1)[1])
+    if k=="admin_topups": return await admin_topups(q)
+    if k.startswith("topup_view:"): return await admin_topup_view(q,k.split(":",1)[1])
+    if k.startswith("topup_approve:"): return await approve_topup(q,context,k.split(":",1)[1],True)
+    if k.startswith("topup_reject:"): return await approve_topup(q,context,k.split(":",1)[1],False)
+    if k=="admin_reports_pro": return await admin_reports_pro(q)
+    if k=="admin_audit": return await admin_audit(q)
+    if k=="config_search": return await config_search_start(q,context)
+    if k.startswith("broadcast_target:"):
+        role=get_admin_role(q.from_user.id)
+        if not can_broadcast(q.from_user.id): await q.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_admin()); return
+        return await broadcast_target_start(q,context,k.split(":",1)[1])
+    if k=="admin_broadcast": return await admin_broadcast_menu(q,context)
+    if k=="admin_home":
+        role=get_admin_role(q.from_user.id)
+        if not role: await q.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_home()); return
+        await q.edit_message_text(f"👑 پنل مدیریت {BRAND}\n\nسطح دسترسی: {role}",reply_markup=admin_keyboard(role)); return
+    # Existing routes use the improved global functions.
+    return await BASE_CALLBACK_HANDLER(update,context)
+
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message: return
+    u=await ensure_user(update.effective_user); user_keyboard.current_user_id=update.effective_user.id
+    if u.get("blocked") and not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ دسترسی شما مسدود است."); return
+    text=(update.message.text or "").strip(); state=context.user_data.get("state")
+    if text=="/cancel":
+        context.user_data.clear(); await update.message.reply_text("✅ عملیات لغو شد.",reply_markup=admin_keyboard(get_admin_role(update.effective_user.id)) if get_admin_role(update.effective_user.id) else user_keyboard()); return
+    if state=="wallet_topup_amount":
+        try: amount=int(re.sub(r"[^0-9]","",text))
+        except: amount=0
+        return await add_topup_request(update,amount,context)
+    if state=="config_search":
+        context.user_data.clear(); return await handle_config_search(update,text)
+    if state and state.startswith("broadcast_text:"):
+        target=state.split(":",1)[1]; context.user_data.clear(); return await run_targeted_broadcast(update,text,context,target)
+    if text.startswith("/discount "):
+        return await apply_discount(update,text.split(" ",1)[1].strip())
+    # Keep legacy states intact.
+    return await BASE_MESSAGE_HANDLER(update,context)
+
+
+# Add a little safety to maintenance mode when an existing user is active.
 
 
 if __name__ == "__main__":
