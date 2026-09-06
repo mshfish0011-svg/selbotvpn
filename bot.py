@@ -49,6 +49,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("novalinkvpn")
 
+# Telegram application instance shared with the webhook handler.
+application = None
+
 
 # =========================================================
 # TIME / HELPERS
@@ -2788,6 +2791,8 @@ async def telegram_webhook(request):
 # =========================================================
 
 async def main():
+    global application
+
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN environment variable is missing."
