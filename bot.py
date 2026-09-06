@@ -2800,6 +2800,8 @@ async def main():
 
     load_data()
 
+    application = Application.builder().token(BOT_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("myid", myid_command))
