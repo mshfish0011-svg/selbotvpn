@@ -49,9 +49,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("novalinkvpn")
 
-# Telegram application instance shared with the webhook handler.
-application = None
-
 
 # =========================================================
 # TIME / HELPERS
@@ -92,7 +89,7 @@ def esc(value):
 def default_data():
     return {
         "meta": {
-            "version": 1,
+            "version": 3,
             "created_at": now_iso(),
             "updated_at": now_iso(),
         },
@@ -107,11 +104,7 @@ def default_data():
             "expiry_notice_days": [7, 3, 1],
             "referral_reward": 0,
             "min_topup": 0,
-            "ticket_retention_hours": 72,
-            "auto_backup_enabled": True,
-            "loyalty_enabled": True,
-            "loyalty_rate": 1,
-            "max_open_tickets_per_user": 3,
+            "closed_ticket_retention_hours": 72,
         },
         "users": {},
         "services": {},
@@ -121,8 +114,6 @@ def default_data():
         "referrals": {},
         "tickets": {},
         "broadcasts": {},
-        "audit_logs": {},
-        "notifications": {},
         "admins": {
             str(ADMIN_ID): {
                 "role": "owner",
@@ -138,6 +129,7 @@ def default_data():
 
 
 data = default_data()
+application = None
 data_lock = asyncio.Lock()
 
 
@@ -163,8 +155,6 @@ def normalize_data():
         "referrals",
         "tickets",
         "broadcasts",
-        "audit_logs",
-        "notifications",
     ]:
         if not isinstance(data.get(key), dict):
             data[key] = {}
@@ -180,6 +170,7 @@ def normalize_data():
                 str(ADMIN_ID), {}
             ).get("created_at", now_iso()),
         }
+    normalize_inventory()
 
 
 def load_data():
@@ -317,31 +308,6 @@ def can_manage_support(user_id):
 
 def can_broadcast(user_id):
     return get_admin_role(user_id) in {"owner", "manager"}
-
-
-async def audit_action(admin_id, action, target="", details=""):
-    """Keep a compact audit trail in JSON."""
-    try:
-        log_id = uid("audit")
-        data.setdefault("audit_logs", {})[log_id] = {
-            "id": log_id,
-            "admin_id": int(admin_id),
-            "action": str(action),
-            "target": str(target),
-            "details": str(details)[:1000],
-            "created_at": now_iso(),
-        }
-        logs = data["audit_logs"]
-        if len(logs) > 2000:
-            keep = sorted(
-                logs,
-                key=lambda k: logs[k].get("created_at", ""),
-                reverse=True,
-            )[:2000]
-            data["audit_logs"] = {k: logs[k] for k in keep}
-        await save_data()
-    except Exception:
-        logger.exception("Audit log error.")
 
 
 # =========================================================
@@ -494,6 +460,167 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+# =========================================================
+# CONFIG INVENTORY / DELIVERY
+# =========================================================
+
+def normalize_service_inventory(service):
+    """Keep config inventory backward-compatible."""
+    pool = service.get("config_pool")
+    if not isinstance(pool, list):
+        service["config_pool"] = []
+        return service
+
+    normalized = []
+    for item in pool:
+        if isinstance(item, str):
+            normalized.append({
+                "id": uid("cfg"),
+                "config": item.strip(),
+                "status": "free",
+                "assigned_to": None,
+                "assigned_service_id": None,
+                "assigned_at": None,
+            })
+        elif isinstance(item, dict):
+            cfg = str(item.get("config", "")).strip()
+            if not cfg:
+                continue
+            item.setdefault("id", uid("cfg"))
+            item.setdefault("status", "free")
+            item.setdefault("assigned_to", None)
+            item.setdefault("assigned_service_id", None)
+            item.setdefault("assigned_at", None)
+            normalized.append(item)
+
+    service["config_pool"] = normalized
+    return service
+
+
+def normalize_inventory():
+    for service in data.get("services", {}).values():
+        normalize_service_inventory(service)
+
+
+def free_config_count(service):
+    normalize_service_inventory(service)
+    return sum(
+        1 for x in service.get("config_pool", [])
+        if x.get("status") == "free"
+    )
+
+
+def total_config_count(service):
+    normalize_service_inventory(service)
+    return len(service.get("config_pool", []))
+
+
+def config_already_exists(config_text):
+    target = config_text.strip()
+    if not target:
+        return True
+
+    for service in data["services"].values():
+        normalize_service_inventory(service)
+        for item in service.get("config_pool", []):
+            if item.get("config", "").strip() == target:
+                return True
+    return False
+
+
+def claim_free_config(service, user_id, owned_service_id):
+    normalize_service_inventory(service)
+
+    for item in service.get("config_pool", []):
+        if item.get("status") == "free" and item.get("config"):
+            item["status"] = "assigned"
+            item["assigned_to"] = user_id
+            item["assigned_service_id"] = owned_service_id
+            item["assigned_at"] = now_iso()
+            return item["config"]
+
+    return None
+
+
+def release_config(service, config_id):
+    normalize_service_inventory(service)
+
+    for item in service.get("config_pool", []):
+        if item.get("id") == config_id:
+            item["status"] = "free"
+            item["assigned_to"] = None
+            item["assigned_service_id"] = None
+            item["assigned_at"] = None
+            return True
+    return False
+
+
+async def admin_config_inventory(query, service_id):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+
+    service = data["services"].get(service_id)
+    if not service:
+        await query.edit_message_text("❌ پلن پیدا نشد.", reply_markup=back_admin())
+        return
+
+    normalize_service_inventory(service)
+    total = total_config_count(service)
+    free = free_config_count(service)
+    sold = total - free
+
+    await query.edit_message_text(
+        f"🔑 موجودی کانفیگ\n\n"
+        f"📦 پلن: {esc(service.get('name', '-'))}\n"
+        f"📊 کل: {total}\n"
+        f"🟢 آزاد: {free}\n"
+        f"🔴 تحویل‌شده: {sold}\n\n"
+        "کانفیگ‌های آزاد بعد از خرید موفق به‌صورت خودکار تحویل داده می‌شوند.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ افزودن کانفیگ", callback_data=f"add_configs:{service_id}")],
+            [InlineKeyboardButton("📋 لیست کانفیگ‌ها", callback_data=f"list_configs:{service_id}")],
+            [InlineKeyboardButton("🧹 حذف کانفیگ‌های آزاد", callback_data=f"clear_free_configs:{service_id}")],
+            [InlineKeyboardButton("🔙 پلن", callback_data=f"aservice:{service_id}")],
+        ]),
+    )
+
+
+async def admin_config_list(query, service_id):
+    service = data["services"].get(service_id)
+    if not service:
+        await query.edit_message_text("❌ پلن پیدا نشد.", reply_markup=back_admin())
+        return
+
+    normalize_service_inventory(service)
+    items = service.get("config_pool", [])
+    if not items:
+        body = "هنوز هیچ کانفیگی وارد نشده."
+    else:
+        rows = []
+        for item in items[:40]:
+            state = "🟢 آزاد" if item.get("status") == "free" else "🔴 تحویل"
+            masked = mask_config(item.get("config", ""))
+            rows.append(f"• {state} | {item.get('id')} | {masked}")
+        body = "\n".join(rows)
+
+    await query.edit_message_text(
+        f"📋 کانفیگ‌های {esc(service.get('name', '-'))}\n\n{body}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 موجودی", callback_data=f"config_inventory:{service_id}")],
+        ]),
+    )
+
+
+def mask_config(config):
+    if not config:
+        return "-"
+    if len(config) <= 18:
+        return config[:5] + "•••"
+    return config[:9] + "•••" + config[-6:]
+
+
 # =========================================================
 # USER SHOP
 # =========================================================
@@ -529,9 +656,10 @@ async def show_shop(query):
 
     rows = []
     for service in services[:40]:
+        stock = free_config_count(service)
         rows.append([
             InlineKeyboardButton(
-                f"📦 {service.get('name', 'پلن')}",
+                f"{'🟢' if stock > 0 else '🔴'} {service.get('name', 'پلن')} | {stock}",
                 callback_data=f"view_service:{service['id']}",
             )
         ])
@@ -566,7 +694,8 @@ async def view_service(query, service_id):
         f"💾 حجم: {service.get('traffic_gb', 0)} GB\n"
         f"🌍 سرور: {esc(service.get('server', '-'))}\n"
         f"⏳ مدت: {service.get('duration_days', 0)} روز\n"
-        f"💰 قیمت: {money(service.get('price', 0))} تومان\n\n"
+        f"💰 قیمت: {money(service.get('price', 0))} تومان\n"
+        f"🔑 موجودی: {free_config_count(service)} عدد\n\n"
         f"ℹ️ {esc(service.get('description', ''))}"
     )
 
@@ -601,6 +730,17 @@ async def buy_with_wallet(query, user_id, service_id):
 
     price = int(service.get("price", 0))
 
+    if free_config_count(service) <= 0:
+        await query.edit_message_text(
+            "❌ موجودی کانفیگ این پلن تمام شده است.\n\n"
+            "لطفاً یک پلن دیگر انتخاب کن یا منتظر شارژ موجودی باش.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛒 فروشگاه", callback_data="shop")],
+                [InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")],
+            ]),
+        )
+        return
+
     if user.get("balance", 0) < price:
         await query.edit_message_text(
             f"❌ موجودی کافی نیست.\n\n"
@@ -632,6 +772,21 @@ async def buy_with_wallet(query, user_id, service_id):
         days=int(service.get("duration_days", 30))
     )
 
+    config_text = claim_free_config(service, user_id, service_id_owned)
+    if not config_text:
+        user["balance"] += price
+        await query.edit_message_text(
+            "❌ هنگام اختصاص کانفیگ خطایی رخ داد؛ مبلغ به کیف پول برگردانده شد.",
+            reply_markup=back_home(),
+        )
+        return
+
+    config_item_id = next(
+        (x.get("id") for x in service.get("config_pool", [])
+         if x.get("assigned_service_id") == service_id_owned),
+        None,
+    )
+
     owned = {
         "id": service_id_owned,
         "user_id": user_id,
@@ -639,7 +794,8 @@ async def buy_with_wallet(query, user_id, service_id):
         "plan_name": service.get("name", ""),
         "traffic_gb": service.get("traffic_gb", 0),
         "server": service.get("server", ""),
-        "config": "",
+        "config": config_text,
+        "config_item_id": config_item_id,
         "created_at": now_iso(),
         "expires_at": expires.isoformat(),
         "status": "active",
@@ -685,7 +841,9 @@ async def buy_with_wallet(query, user_id, service_id):
         f"📦 سرویس: {esc(service.get('name', ''))}\n"
         f"💰 مبلغ: {money(price)} تومان\n"
         f"⏳ انقضا: {expires.strftime('%Y-%m-%d')}\n\n"
-        "⚠️ کانفیگ هنوز توسط ادمین برای این سرویس وارد نشده است.",
+        "🔑 کانفیگ اختصاصی تو:\n\n"
+        f"<code>{esc(config_text)}</code>\n\n"
+        "این کانفیگ به‌صورت اختصاصی از موجودی پلن رزرو شد.",
         reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
@@ -699,6 +857,82 @@ async def buy_with_wallet(query, user_id, service_id):
                     callback_data="home",
                 )
             ],
+        ]),
+        parse_mode="HTML",
+    )
+
+
+
+async def renew_service(query, user_id, owned_id):
+    owned = data["services"].get(owned_id)
+    if not owned or owned.get("user_id") != user_id:
+        await query.edit_message_text("❌ سرویس پیدا نشد.", reply_markup=back_home())
+        return
+
+    plan_id = owned.get("plan_id")
+    plan = data["services"].get(plan_id)
+    user = data["users"].get(str(user_id))
+
+    if not plan or not plan.get("active", True) or not user:
+        await query.edit_message_text("❌ پلن تمدید در دسترس نیست.", reply_markup=back_home())
+        return
+
+    price = int(plan.get("price", 0))
+    if user.get("balance", 0) < price:
+        await query.edit_message_text(
+            f"❌ موجودی کافی نیست.\n\nقیمت تمدید: {money(price)} تومان\n"
+            f"موجودی: {money(user.get('balance', 0))} تومان",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 کیف پول", callback_data="wallet")],
+                [InlineKeyboardButton("🔙 سرویس", callback_data=f"owned_service:{owned_id}")],
+            ]),
+        )
+        return
+
+    current = parse_dt(owned.get("expires_at"))
+    now = datetime.now(timezone.utc)
+    base = current if current and current > now else now
+    owned["expires_at"] = (base + timedelta(days=int(plan.get("duration_days", 30)))).isoformat()
+    owned["status"] = "active"
+
+    user["balance"] -= price
+
+    order_id = uid("ord")
+    tx_id = uid("tx")
+    data["orders"][order_id] = {
+        "id": order_id,
+        "user_id": user_id,
+        "service_id": plan_id,
+        "owned_service_id": owned_id,
+        "amount": price,
+        "status": "paid",
+        "created_at": now_iso(),
+        "payment_method": "wallet",
+        "type": "renewal",
+    }
+    data["transactions"][tx_id] = {
+        "id": tx_id,
+        "user_id": user_id,
+        "type": "renewal",
+        "amount": -price,
+        "description": f"تمدید {plan.get('name', '')}",
+        "created_at": now_iso(),
+        "reference": order_id,
+    }
+    user["order_ids"].append(order_id)
+    user["transaction_ids"].append(tx_id)
+    data["stats"]["total_sales"] += 1
+    data["stats"]["total_revenue"] += price
+    await save_data()
+
+    await query.edit_message_text(
+        "✅ تمدید با موفقیت انجام شد!\n\n"
+        f"📦 {esc(plan.get('name', 'سرویس'))}\n"
+        f"💰 {money(price)} تومان\n"
+        f"⏳ انقضای جدید: {parse_dt(owned['expires_at']).strftime('%Y-%m-%d %H:%M')}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📦 سرویس من", callback_data=f"owned_service:{owned_id}")],
+            [InlineKeyboardButton("🏠 منوی اصلی", callback_data="home")],
         ]),
     )
 
@@ -777,7 +1011,11 @@ async def show_owned_service(query, service_id):
                 InlineKeyboardButton(
                     "🔄 تمدید",
                     callback_data=f"renew:{service_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    "📋 دریافت کانفیگ",
+                    callback_data=f"send_config:{service_id}",
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -959,21 +1197,6 @@ async def apply_discount(update, code):
 
 
 async def show_support(query, user_id):
-    open_tickets = [
-        t for t in data["tickets"].values()
-        if t.get("user_id") == user_id and t.get("status") == "open"
-    ]
-    max_open = int(data["settings"].get("max_open_tickets_per_user", 3) or 3)
-
-    if len(open_tickets) >= max_open:
-        await query.edit_message_text(
-            f"🎫 پشتیبانی\n\n"
-            f"حداکثر {max_open} تیکت باز مجاز است.\n"
-            "لطفاً یکی از تیکت‌های قبلی را تکمیل یا ببند.",
-            reply_markup=back_home(),
-        )
-        return
-
     ticket_id = uid("ticket")
 
     data["tickets"][ticket_id] = {
@@ -1028,9 +1251,7 @@ def dashboard_text():
         f"🛒 سفارش پرداخت‌شده: {paid_orders}\n"
         f"💰 درآمد ثبت‌شده: {money(data['stats'].get('total_revenue', 0))} تومان\n"
         f"🎫 تیکت باز: {open_tickets}\n"
-        f"🎁 کد تخفیف: {len(data['discounts'])}\n"
-        f"🧾 لاگ مدیریتی: {len(data.get('audit_logs', {}))}\n"
-        f"🕒 نگهداری تیکت بسته: {data['settings'].get('ticket_retention_hours', 72)} ساعت\n\n"
+        f"🎁 کد تخفیف: {len(data['discounts'])}\n\n"
         f"🕒 آخرین بروزرسانی:\n{data['meta'].get('updated_at', '-')}"
     )
 
@@ -1182,9 +1403,16 @@ async def admin_service_view(query, service_id):
         f"💾 حجم: {s.get('traffic_gb', 0)} GB\n"
         f"⏳ مدت: {s.get('duration_days', 0)} روز\n"
         f"🌍 سرور: {esc(s.get('server', '-'))}\n"
-        f"🚦 وضعیت: {status}\n\n"
+        f"🚦 وضعیت: {status}\n"
+        f"🔑 موجودی کانفیگ: {free_config_count(s)} آزاد / {total_config_count(s)} کل\n\n"
         f"{esc(s.get('description', ''))}",
         reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔑 مدیریت کانفیگ‌ها",
+                    callback_data=f"config_inventory:{service_id}",
+                )
+            ],
             [
                 InlineKeyboardButton(
                     "✏️ ویرایش",
@@ -1502,9 +1730,7 @@ async def admin_settings(query):
         f"🔔 اعلان انقضا: {'روشن' if s.get('auto_expiry_notice') else 'خاموش'}\n"
         f"🎁 پاداش دعوت: {money(s.get('referral_reward', 0))} تومان\n"
         f"💰 حداقل شارژ: {money(s.get('min_topup', 0))} تومان\n"
-        f"🎫 نگهداری تیکت بسته: {s.get('ticket_retention_hours', 72)} ساعت\n"
-        f"💾 بکاپ خودکار: {'روشن' if s.get('auto_backup_enabled', True) else 'خاموش'}\n"
-        f"⭐ Loyalty: {'روشن' if s.get('loyalty_enabled', True) else 'خاموش'}",
+        f"🎫 حذف تیکت بسته: {s.get('closed_ticket_retention_hours', 72)} ساعت",
         reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
@@ -1516,24 +1742,6 @@ async def admin_settings(query):
                 InlineKeyboardButton(
                     "🔔 اعلان انقضا",
                     callback_data="toggle_expiry",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "💾 بکاپ خودکار روشن/خاموش",
-                    callback_data="toggle_auto_backup",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⭐ Loyalty روشن/خاموش",
-                    callback_data="toggle_loyalty",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🎫 مدت نگهداری تیکت",
-                    callback_data="set_ticket_retention",
                 )
             ],
             [
@@ -1724,6 +1932,52 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_service_view(query, data_key.split(":", 1)[1])
         return
 
+    if data_key.startswith("config_inventory:"):
+        await admin_config_inventory(query, data_key.split(":", 1)[1])
+        return
+
+    if data_key.startswith("list_configs:"):
+        await admin_config_list(query, data_key.split(":", 1)[1])
+        return
+
+    if data_key.startswith("add_configs:"):
+        if not can_manage_services(query.from_user.id):
+            await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+            return
+        sid = data_key.split(":", 1)[1]
+        context.user_data["state"] = f"add_configs:{sid}"
+        await query.edit_message_text(
+            "➕ افزودن کانفیگ\n\n"
+            "هر کانفیگ را در یک خط جداگانه بفرست.\n"
+            "می‌توانی ۱ تا چند صد کانفیگ را یکجا ارسال کنی.\n\n"
+            "مثال:\n"
+            "vless://...\n"
+            "vless://...\n"
+            "vmess://...\n\n"
+            "کانفیگ تکراری دوباره اضافه نمی‌شود.\n"
+            "/cancel برای لغو",
+            reply_markup=back_admin(),
+        )
+        return
+
+    if data_key.startswith("clear_free_configs:"):
+        if not can_manage_services(query.from_user.id):
+            await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+            return
+        sid = data_key.split(":", 1)[1]
+        service = data["services"].get(sid)
+        if service:
+            normalize_service_inventory(service)
+            before = len(service["config_pool"])
+            service["config_pool"] = [
+                x for x in service["config_pool"] if x.get("status") != "free"
+            ]
+            removed = before - len(service["config_pool"])
+            await save_data()
+            await query.answer(f"{removed} کانفیگ آزاد حذف شد.", show_alert=True)
+        await admin_config_inventory(query, sid)
+        return
+
     if data_key == "admin_add_service":
         if not can_manage_services(query.from_user.id):
             await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
@@ -1878,36 +2132,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data_key.startswith("close_ticket:"):
-        if not can_manage_support(query.from_user.id):
-            await query.answer("⛔ دسترسی ندارید.", show_alert=True)
-            return
         tid = data_key.split(":", 1)[1]
         ticket = data["tickets"].get(tid)
         if ticket:
             ticket["status"] = "closed"
             ticket["closed_at"] = now_iso()
-            ticket["updated_at"] = ticket["closed_at"]
+            ticket["updated_at"] = now_iso()
             await save_data()
-            await audit_action(
-                query.from_user.id,
-                "close_ticket",
-                tid,
-                f"user={ticket.get('user_id')}",
-            )
             try:
                 await context.bot.send_message(
-                    chat_id=int(ticket.get("user_id")),
+                    chat_id=int(ticket["user_id"]),
                     text=(
-                        f"✅ تیکت {tid} بسته شد.\n\n"
-                        "این تیکت تا ۷۲ ساعت نگهداری می‌شود و سپس خودکار حذف خواهد شد."
+                        "✅ تیکت شما بسته شد.\n\n"
+                        "این تیکت تا ۷۲ ساعت نگهداری می‌شود و سپس "
+                        "در صورت بسته‌بودن به‌صورت خودکار حذف خواهد شد."
                     ),
                 )
             except Exception:
                 pass
-        await query.edit_message_text(
-            "✅ تیکت بسته شد. حذف خودکار پس از ۷۲ ساعت.",
-            reply_markup=back_admin(),
-        )
+        await query.edit_message_text("✅ تیکت بسته شد.", reply_markup=back_admin())
         return
 
     if data_key.startswith("reply_ticket:"):
@@ -2067,39 +2310,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_settings(query)
         return
 
-    if data_key == "toggle_auto_backup":
-        if not is_owner(query.from_user.id):
-            await query.answer("فقط Owner.", show_alert=True)
-            return
-        data["settings"]["auto_backup_enabled"] = not data["settings"].get("auto_backup_enabled", True)
-        await save_data()
-        await audit_action(query.from_user.id, "toggle_auto_backup", "", str(data["settings"]["auto_backup_enabled"]))
-        await admin_settings(query)
-        return
-
-    if data_key == "toggle_loyalty":
-        if not is_owner(query.from_user.id):
-            await query.answer("فقط Owner.", show_alert=True)
-            return
-        data["settings"]["loyalty_enabled"] = not data["settings"].get("loyalty_enabled", True)
-        await save_data()
-        await audit_action(query.from_user.id, "toggle_loyalty", "", str(data["settings"]["loyalty_enabled"]))
-        await admin_settings(query)
-        return
-
-    if data_key == "set_ticket_retention":
-        if not is_owner(query.from_user.id):
-            await query.answer("فقط Owner.", show_alert=True)
-            return
-        context.user_data["state"] = "set_ticket_retention"
-        await query.edit_message_text(
-            "🎫 مدت نگهداری تیکت بسته را به ساعت بفرست.\n"
-            "پیشنهاد: 72\n\n"
-            "/cancel برای لغو",
-            reply_markup=back_admin(),
-        )
-        return
-
     if data_key == "set_referral_reward":
         context.user_data["state"] = "set_referral_reward"
         await query.edit_message_text(
@@ -2203,8 +2413,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data_key.startswith("send_config:"):
+        owned = data["services"].get(data_key.split(":", 1)[1])
+        if not owned or owned.get("user_id") != query.from_user.id:
+            await query.answer("دسترسی ندارید.", show_alert=True)
+            return
+        config_text = owned.get("config") or "کانفیگی برای این سرویس ثبت نشده است."
+        await query.message.reply_text(
+            f"🔑 کانفیگ سرویس {esc(owned.get('plan_name', ''))}:\n\n"
+            f"<code>{esc(config_text)}</code>",
+            parse_mode="HTML",
+        )
+        await query.answer("کانفیگ ارسال شد ✅")
+        return
+
     if data_key.startswith("renew:"):
-        await query.answer("سیستم تمدید در نسخه بعدی تکمیل می‌شود.", show_alert=True)
+        await renew_service(query, query.from_user.id, data_key.split(":", 1)[1])
         return
 
 
@@ -2248,6 +2472,55 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await apply_discount(update, text)
         return
 
+    # Admin config inventory import
+    if state and state.startswith("add_configs:"):
+        if not can_manage_services(update.effective_user.id):
+            context.user_data.clear()
+            await update.message.reply_text("⛔ دسترسی ندارید.")
+            return
+
+        sid = state.split(":", 1)[1]
+        service = data["services"].get(sid)
+        if not service:
+            context.user_data.clear()
+            await update.message.reply_text("❌ پلن پیدا نشد.")
+            return
+
+        normalize_service_inventory(service)
+        candidates = [x.strip() for x in text.splitlines() if x.strip()]
+        if not candidates:
+            await update.message.reply_text("❌ حداقل یک کانفیگ معتبر بفرست.")
+            return
+
+        added = 0
+        duplicate = 0
+        for cfg in candidates:
+            if config_already_exists(cfg):
+                duplicate += 1
+                continue
+            service["config_pool"].append({
+                "id": uid("cfg"),
+                "config": cfg,
+                "status": "free",
+                "assigned_to": None,
+                "assigned_service_id": None,
+                "assigned_at": None,
+                "created_at": now_iso(),
+            })
+            added += 1
+
+        context.user_data.clear()
+        await save_data()
+
+        await update.message.reply_text(
+            f"✅ موجودی کانفیگ بروزرسانی شد.\n\n"
+            f"➕ اضافه‌شده: {added}\n"
+            f"♻️ تکراری: {duplicate}\n"
+            f"📦 موجودی آزاد فعلی: {free_config_count(service)}",
+            reply_markup=admin_keyboard(get_admin_role(update.effective_user.id)),
+        )
+        return
+
     # Admin service creation
     if state == "admin_add_service":
         if not can_manage_services(update.effective_user.id):
@@ -2286,6 +2559,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "server": parts[4],
             "description": parts[5],
             "active": True,
+            "config_pool": [],
             "created_at": now_iso(),
         }
 
@@ -2647,30 +2921,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Ticket retention
-    if state == "set_ticket_retention":
-        if not is_owner(update.effective_user.id):
-            context.user_data.clear()
-            await update.message.reply_text("⛔ فقط Owner.")
-            return
-        try:
-            hours = int(text)
-            if hours < 1 or hours > 8760:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text("❌ عدد ساعت باید بین 1 تا 8760 باشد.")
-            return
-
-        data["settings"]["ticket_retention_hours"] = hours
-        context.user_data.clear()
-        await save_data()
-        await audit_action(update.effective_user.id, "set_ticket_retention", "", str(hours))
-        await update.message.reply_text(
-            f"✅ مدت نگهداری تیکت‌های بسته روی {hours} ساعت تنظیم شد.",
-            reply_markup=admin_keyboard("owner"),
-        )
-        return
-
     # Referral reward
     if state == "set_referral_reward":
         if not is_owner(update.effective_user.id):
@@ -2815,48 +3065,45 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
 # =========================================================
-# TICKET RETENTION / CLEANUP
+# TICKET AUTO CLEANUP
 # =========================================================
 
 async def ticket_cleanup_worker():
     while True:
         try:
-            retention_hours = int(
-                data["settings"].get("ticket_retention_hours", 72) or 72
-            )
+            retention_hours = int(data["settings"].get("closed_ticket_retention_hours", 72))
             cutoff = datetime.now(timezone.utc) - timedelta(hours=retention_hours)
-            deleted = []
+            removed = []
 
             for tid, ticket in list(data["tickets"].items()):
                 if ticket.get("status") != "closed":
                     continue
 
-                closed_at = parse_dt(
-                    ticket.get("closed_at") or ticket.get("updated_at")
-                )
-                if not closed_at or closed_at > cutoff:
-                    continue
+                closed_at = parse_dt(ticket.get("closed_at") or ticket.get("updated_at"))
+                if closed_at and closed_at <= cutoff:
+                    removed.append(tid)
+                    user_id = str(ticket.get("user_id"))
+                    user = data["users"].get(user_id)
+                    if user:
+                        user["ticket_ids"] = [
+                            x for x in user.get("ticket_ids", []) if x != tid
+                        ]
 
-                user = data["users"].get(str(ticket.get("user_id")))
-                if user:
-                    user["ticket_ids"] = [
-                        x for x in user.get("ticket_ids", []) if x != tid
-                    ]
-
+            for tid in removed:
                 data["tickets"].pop(tid, None)
-                deleted.append(tid)
 
-            if deleted:
+            if removed:
                 await save_data()
-                logger.info("Auto-deleted %d closed tickets.", len(deleted))
+                logger.info("Auto-removed %s closed tickets.", len(removed))
 
             await asyncio.sleep(3600)
 
         except asyncio.CancelledError:
             break
         except Exception:
-            logger.exception("Ticket cleanup worker error.")
+            logger.exception("Ticket cleanup error.")
             await asyncio.sleep(60)
 
 
@@ -2940,8 +3187,7 @@ async def auto_backup_worker():
     while True:
         try:
             await asyncio.sleep(AUTO_BACKUP_HOURS * 3600)
-            if data["settings"].get("auto_backup_enabled", True):
-                await make_backup("auto")
+            await make_backup("auto")
         except asyncio.CancelledError:
             break
         except Exception:
@@ -2989,8 +3235,6 @@ async def telegram_webhook(request):
 # =========================================================
 
 async def main():
-    global application
-
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN environment variable is missing."
@@ -3000,6 +3244,8 @@ async def main():
         logger.warning(
             "ADMIN_ID is not configured. Admin panel will be unavailable."
         )
+
+    global application
 
     load_data()
 
