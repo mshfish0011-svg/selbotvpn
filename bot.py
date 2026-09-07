@@ -247,31 +247,57 @@ async def make_backup(reason="manual"):
 
 
 def restore_from_bytes(raw):
-    restored = json.loads(raw.decode("utf-8"))
+    """Validate and normalize a NovaLinkVPN JSON backup.
 
-    required = [
-        "meta",
-        "settings",
-        "users",
-        "services",
-        "orders",
-        "transactions",
-        "discounts",
-        "referrals",
-        "tickets",
-        "broadcasts",
-        "admins",
+    Backups from older bot versions are accepted as long as their core
+    structures are valid; newer fields are recreated by normalize_data().
+    """
+    if not isinstance(raw, (bytes, bytearray)):
+        raise ValueError("Backup data is not valid.")
+
+    if len(raw) > 10 * 1024 * 1024:
+        raise ValueError("Backup file is too large (maximum 10 MB).")
+
+    try:
+        restored = json.loads(bytes(raw).decode("utf-8-sig"))
+    except UnicodeDecodeError as e:
+        raise ValueError("Backup must be a UTF-8 JSON file.") from e
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON at line {e.lineno}, column {e.colno}.") from e
+
+    if not isinstance(restored, dict):
+        raise ValueError("Backup root must be a JSON object.")
+
+    # Core structures required by the bot. Missing optional/newer fields
+    # are intentionally recreated instead of rejecting older backups.
+    required_dicts = [
+        "settings", "users", "services", "orders",
+        "transactions", "discounts", "referrals", "tickets",
+        "broadcasts", "admins",
     ]
 
-    for key in required:
+    for key in required_dicts:
         if key not in restored:
-            raise ValueError(f"Missing key: {key}")
+            raise ValueError(f"Missing required section: {key}")
+        if not isinstance(restored[key], dict):
+            raise ValueError(f"Invalid structure for section: {key}")
 
-    if not isinstance(restored["users"], dict):
-        raise ValueError("Invalid users structure.")
+    if not isinstance(restored.get("meta", {}), dict):
+        raise ValueError("Invalid meta section.")
 
-    if not isinstance(restored["services"], dict):
-        raise ValueError("Invalid services structure.")
+    restored.setdefault("meta", {})
+    restored.setdefault("schema_version", 1)
+
+    # Newer systems can safely be restored from older backups.
+    restored.setdefault("test_configs", {})
+    restored.setdefault("test_claims", {})
+    restored.setdefault("audit_log", [])
+    restored.setdefault("notifications", {})
+
+    if not isinstance(restored["test_configs"], dict):
+        restored["test_configs"] = {}
+    if not isinstance(restored["test_claims"], dict):
+        restored["test_claims"] = {}
 
     return restored
 
@@ -3174,61 +3200,96 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle JSON backup uploads for Owner restore."""
     if not update.message or not update.message.document:
         return
 
-    user = await ensure_user(update.effective_user)
-
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text("⛔ فقط Owner می‌تواند Restore کند.")
-        return
-
-    if context.user_data.get("state") != "restore_file":
-        await update.message.reply_text(
-            "📄 فایل دریافت شد، اما حالت Restore فعال نیست."
-        )
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ فقط Owner می‌تواند Restore انجام دهد.")
         return
 
     doc = update.message.document
+    filename = (doc.file_name or "").strip()
+    is_json = filename.lower().endswith(".json")
+    restore_mode = context.user_data.get("state") == "restore_file"
+    looks_like_backup = filename.lower().startswith("novalinkvpn_backup")
 
-    if not doc.file_name.lower().endswith(".json"):
+    if not is_json:
         await update.message.reply_text(
-            "❌ فقط فایل .json قبول می‌شود."
+            "❌ فقط فایل JSON قابل بازیابی است.\n\n"
+            "فایل بکاپ باید با پسوند .json باشد."
         )
         return
 
-    tg_file = await context.bot.get_file(doc.file_id)
-    content = await tg_file.download_as_bytearray()
+    if not restore_mode and not looks_like_backup:
+        await update.message.reply_text(
+            "📄 این فایل دریافت شد، اما حالت بازیابی فعال نیست.\n\n"
+            "اول از پنل مدیریت وارد «💾 بکاپ / بازیابی» → «📤 حالت بازیابی» شو."
+        )
+        return
+
+    if doc.file_size and doc.file_size > 10 * 1024 * 1024:
+        await update.message.reply_text(
+            "❌ فایل بیش از حد بزرگ است. حداکثر اندازه بکاپ 10MB است."
+        )
+        return
 
     try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        content = await tg_file.download_as_bytearray()
         restored = restore_from_bytes(bytes(content))
     except Exception as e:
-        context.user_data.clear()
+        logger.exception("Restore validation failed")
+        context.user_data.pop("state", None)
         await update.message.reply_text(
-            f"❌ بکاپ معتبر نیست:\n{e}",
+            "❌ بازیابی انجام نشد.\n\n"
+            f"جزئیات: {e}\n\n"
+            "فایل باید همان JSON بکاپی باشد که ربات ساخته است.",
             reply_markup=admin_keyboard("owner"),
         )
         return
 
-    # Safety backup before replacing
     try:
         await make_backup("before_restore")
-    except Exception:
-        logger.exception("Could not create pre-restore backup.")
+    except Exception as e:
+        logger.exception("Could not create pre-restore backup")
+        context.user_data.pop("state", None)
+        await update.message.reply_text(
+            "❌ برای امنیت، بکاپ فعلی قبل از Restore ساخته نشد؛\n"
+            "بنابراین Restore انجام نشد.\n\n"
+            f"خطا: {e}",
+            reply_markup=admin_keyboard("owner"),
+        )
+        return
 
     global data
     data = restored
-    normalize_data()
-    await save_data()
+
+    try:
+        normalize_data()
+        normalize_test_system()
+        save_data_sync()
+    except Exception as e:
+        logger.exception("Restore normalization/save failed")
+        context.user_data.pop("state", None)
+        await update.message.reply_text(
+            "❌ داده بکاپ خوانده شد اما هنگام ثبت نهایی خطا رخ داد.\n\n"
+            f"خطا: {e}",
+            reply_markup=admin_keyboard("owner"),
+        )
+        return
 
     context.user_data.clear()
-
     await update.message.reply_text(
-        "✅ Restore با موفقیت انجام شد.\n\n"
-        "داده‌های JSON جایگزین شدند.",
+        "✅ Restore با موفقیت انجام شد!\n\n"
+        f"📁 فایل: {filename or 'backup.json'}\n"
+        f"👥 کاربران: {len(data.get('users', {}))}\n"
+        f"📦 سرویس‌ها: {len(data.get('services', {}))}\n"
+        f"🧪 کانفیگ‌های تست: {len(data.get('test_configs', {}))}\n\n"
+        "🛡️ یک بکاپ ایمنی از اطلاعات قبلی نیز قبل از Restore ساخته شد.",
         reply_markup=admin_keyboard("owner"),
     )
-
 
 
 # =========================================================
