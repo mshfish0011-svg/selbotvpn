@@ -135,6 +135,7 @@ data = default_data()
 application = None
 data_lock = asyncio.Lock()
 purchase_lock = asyncio.Lock()
+test_lock = asyncio.Lock()
 
 
 # =========================================================
@@ -356,82 +357,31 @@ async def ensure_user(tg_user):
 # =========================================================
 
 def user_keyboard():
+    unread = unread_notifications(getattr(user_keyboard, "current_user_id", 0)) if getattr(user_keyboard, "current_user_id", 0) else 0
+    label = f"🔔 اعلان‌ها ({unread})" if unread else "🔔 اعلان‌ها"
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop"),
-            InlineKeyboardButton("📦 سرویس‌های من", callback_data="my_services"),
-        ],
-        [
-            InlineKeyboardButton("👤 حساب کاربری", callback_data="account"),
-            InlineKeyboardButton("💳 کیف پول", callback_data="wallet"),
-        ],
-        [
-            InlineKeyboardButton("🎁 کد تخفیف", callback_data="discount"),
-            InlineKeyboardButton("⭐ دعوت دوستان", callback_data="referral"),
-        ],
-        [
-            InlineKeyboardButton("🎫 پشتیبانی", callback_data="support"),
-            InlineKeyboardButton("📢 کانال", callback_data="channel"),
-        ],
+        [InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop"), InlineKeyboardButton("🧪 تست رایگان", callback_data="test_menu")],
+        [InlineKeyboardButton("📦 سرویس‌های من", callback_data="my_services"), InlineKeyboardButton("👤 حساب کاربری", callback_data="account")],
+        [InlineKeyboardButton("💳 کیف پول", callback_data="wallet"), InlineKeyboardButton("🧾 سفارش‌ها", callback_data="orders")],
+        [InlineKeyboardButton(label, callback_data="notifications"), InlineKeyboardButton("🎁 کد تخفیف", callback_data="discount")],
+        [InlineKeyboardButton("⭐ دعوت دوستان", callback_data="referral"), InlineKeyboardButton("🎫 پشتیبانی", callback_data="support")],
+        [InlineKeyboardButton("📢 کانال", callback_data="channel")],
     ])
-
 
 def admin_keyboard(role="owner"):
     rows = [
-        [
-            InlineKeyboardButton("📊 داشبورد", callback_data="admin_dashboard"),
-            InlineKeyboardButton("👥 کاربران", callback_data="admin_users"),
-        ],
-        [
-            InlineKeyboardButton("📦 سرویس‌ها", callback_data="admin_services"),
-            InlineKeyboardButton("🛒 سفارش‌ها", callback_data="admin_orders"),
-        ],
-        [
-            InlineKeyboardButton("💳 تراکنش‌ها", callback_data="admin_transactions"),
-            InlineKeyboardButton("🎁 تخفیف‌ها", callback_data="admin_discounts"),
-        ],
-        [
-            InlineKeyboardButton("⭐ دعوت‌ها", callback_data="admin_referral"),
-            InlineKeyboardButton("🎫 پشتیبانی", callback_data="admin_support"),
-        ],
-        [
-            InlineKeyboardButton("📢 ارسال همگانی", callback_data="admin_broadcast"),
-            InlineKeyboardButton("📈 گزارش‌ها", callback_data="admin_reports"),
-        ],
-        [
-            InlineKeyboardButton("💾 بکاپ / بازیابی", callback_data="admin_backup"),
-            InlineKeyboardButton("⚙️ تنظیمات", callback_data="admin_settings"),
-        ],
+        [InlineKeyboardButton("📊 داشبورد",callback_data="admin_dashboard"), InlineKeyboardButton("👥 کاربران",callback_data="admin_users")],
+        [InlineKeyboardButton("📦 سرویس‌ها",callback_data="admin_services"), InlineKeyboardButton("🔑 مرکز کانفیگ",callback_data="admin_configs")],
+        [InlineKeyboardButton("🧪 مرکز تست رایگان",callback_data="admin_test"), InlineKeyboardButton("⚡ مرکز عملیات",callback_data="admin_ops")],
+        [InlineKeyboardButton("💰 درخواست شارژ",callback_data="admin_topups"), InlineKeyboardButton("🛒 سفارش‌ها",callback_data="admin_orders")],
+        [InlineKeyboardButton("💳 تراکنش‌ها",callback_data="admin_transactions"), InlineKeyboardButton("🎁 تخفیف‌ها",callback_data="admin_discounts")],
+        [InlineKeyboardButton("⭐ دعوت‌ها",callback_data="admin_referral"), InlineKeyboardButton("🎫 پشتیبانی",callback_data="admin_support")],
+        [InlineKeyboardButton("📢 ارسال همگانی",callback_data="admin_broadcast"), InlineKeyboardButton("📈 گزارش‌های حرفه‌ای",callback_data="admin_reports_pro")],
+        [InlineKeyboardButton("💾 بکاپ / بازیابی",callback_data="admin_backup"), InlineKeyboardButton("⚙️ تنظیمات",callback_data="admin_settings")],
     ]
-
-    if role in {"owner", "manager"}:
-        rows.append([
-            InlineKeyboardButton("🔑 مدیریت کانفیگ‌ها", callback_data="admin_configs"),
-        ])
-
     if role == "owner":
-        rows.append([
-            InlineKeyboardButton("🛡️ دسترسی مدیران", callback_data="admin_staff"),
-        ])
-
+        rows.append([InlineKeyboardButton("🛡️ دسترسی مدیران",callback_data="admin_staff"), InlineKeyboardButton("🧾 لاگ مدیریت",callback_data="admin_audit")])
     return InlineKeyboardMarkup(rows)
-
-
-def back_admin():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin_home")]
-    ])
-
-
-def back_home():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")]
-    ])
-
-
-# =========================================================
-# START / HOME
-# =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await ensure_user(update.effective_user)
@@ -1357,6 +1307,12 @@ async def admin_user_view(query, user_id):
         ],
         [
             InlineKeyboardButton(
+                "🧪 مدیریت تست کاربر",
+                callback_data=f"test_user_view:{user_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 "📦 سرویس‌های کاربر",
                 callback_data=f"user_services:{user_id}",
             )
@@ -1377,6 +1333,8 @@ async def admin_user_view(query, user_id):
         f"💰 موجودی: {money(u.get('balance', 0))} تومان\n"
         f"📦 سرویس‌ها: {len(u.get('service_ids', []))}\n"
         f"⭐ امتیاز: {u.get('points', 0)}\n"
+        f"{test_status_for_account(user_id)}\n"
+        f"🎁 مجوز تست اضافه: {u.get('test_extra_credits', 0)}\n"
         f"🚦 وضعیت: {'مسدود' if u.get('blocked') else 'فعال'}\n"
         f"📅 عضویت: {u.get('created_at', '-')}\n"
         f"🕒 آخرین فعالیت: {u.get('last_seen', '-')}",
@@ -3568,15 +3526,620 @@ BASE_ADMIN_CONFIGS_FREE = admin_configs_free
 BASE_ADMIN_CONFIGS_SOLD = admin_configs_sold
 BASE_ADMIN_REPORTS = admin_reports
 BASE_APPLY_DISCOUNT = apply_discount
+
 BASE_CALLBACK_HANDLER = callback_handler
 BASE_MESSAGE_HANDLER = message_handler
 
 
+# =========================================================
+# 🧪 NOVALINKVPN FREE TEST SYSTEM v1
+# Separate inventory, one-test-per-user by default,
+# admin-granted extra test credits, history, statistics,
+# secure ownership checks, and JSON backup compatibility.
+# =========================================================
+
+TEST_DEFAULT_DURATION_HOURS = 2
+TEST_MAX_DURATION_HOURS = 168
+
+
+def _test_settings():
+    return data.setdefault("settings", {})
+
+
+def normalize_test_data():
+    s = _test_settings()
+    data.setdefault("test_configs", {})
+    data.setdefault("test_claims", {})
+
+    s.setdefault("test_enabled", True)
+    s.setdefault("test_duration_hours", TEST_DEFAULT_DURATION_HOURS)
+    s.setdefault("test_one_per_user", True)
+    s.setdefault("test_allowance_mode", "admin_grant")
+    s.setdefault("test_low_stock_threshold", 5)
+
+    try:
+        s["test_duration_hours"] = max(1, min(int(s.get("test_duration_hours", TEST_DEFAULT_DURATION_HOURS)), TEST_MAX_DURATION_HOURS))
+    except Exception:
+        s["test_duration_hours"] = TEST_DEFAULT_DURATION_HOURS
+
+    for key, u in data.get("users", {}).items():
+        u.setdefault("test_claim_count", 0)
+        u.setdefault("test_extra_credits", 0)
+        u.setdefault("test_history_ids", [])
+
+    # Normalize test inventory records.
+    normalized = {}
+    for key, item in list(data.get("test_configs", {}).items()):
+        if isinstance(item, str):
+            cfg = item.strip()
+            if not cfg:
+                continue
+            item = {
+                "id": str(key) if key else uid("testcfg"),
+                "config": cfg,
+                "status": "free",
+                "assigned_to": None,
+                "claim_id": None,
+                "assigned_at": None,
+                "created_at": now_iso(),
+            }
+        elif isinstance(item, dict):
+            cfg = str(item.get("config", "")).strip()
+            if not cfg:
+                continue
+            item["config"] = cfg
+            item.setdefault("id", str(key) if key else uid("testcfg"))
+            item.setdefault("status", "free")
+            item.setdefault("assigned_to", None)
+            item.setdefault("claim_id", None)
+            item.setdefault("assigned_at", None)
+            item.setdefault("created_at", now_iso())
+        else:
+            continue
+        normalized[str(item["id"])] = item
+    data["test_configs"] = normalized
+
+
+def test_total_count():
+    normalize_test_data()
+    return len(data["test_configs"])
+
+
+def test_free_count():
+    normalize_test_data()
+    return sum(1 for x in data["test_configs"].values() if x.get("status") == "free" and x.get("config"))
+
+
+def test_assigned_count():
+    normalize_test_data()
+    return sum(1 for x in data["test_configs"].values() if x.get("status") == "assigned")
+
+
+def test_user_claims(user_id):
+    normalize_test_data()
+    return [
+        x for x in data["test_claims"].values()
+        if int(x.get("user_id", 0)) == int(user_id)
+    ]
+
+
+def test_active_claim(user_id):
+    normalize_test_data()
+    now = datetime.now(timezone.utc)
+    active = None
+    for claim in data["test_claims"].values():
+        if int(claim.get("user_id", 0)) != int(user_id):
+            continue
+        if claim.get("status") != "active":
+            continue
+        exp = parse_dt(claim.get("expires_at"))
+        if exp and exp > now:
+            active = claim
+            break
+        claim["status"] = "expired"
+    return active
+
+
+def test_remaining(claim):
+    if not claim:
+        return "-"
+    exp = parse_dt(claim.get("expires_at"))
+    if not exp:
+        return "-"
+    sec = int((exp - datetime.now(timezone.utc)).total_seconds())
+    if sec <= 0:
+        return "منقضی شده"
+    h, rem = divmod(sec, 3600)
+    m = rem // 60
+    if h:
+        return f"{h} ساعت و {m} دقیقه"
+    return f"{m} دقیقه"
+
+
+def test_config_duplicate(config_text):
+    target = str(config_text or "").strip()
+    if not target:
+        return True
+    normalize_test_data()
+    for item in data["test_configs"].values():
+        if str(item.get("config", "")).strip() == target:
+            return True
+    for service in data.get("services", {}).values():
+        normalize_service_inventory(service)
+        for item in service.get("config_pool", []):
+            if str(item.get("config", "")).strip() == target:
+                return True
+    return False
+
+
+def find_user_identifier(identifier):
+    raw = str(identifier or "").strip()
+    raw = raw.lstrip("@")
+    if not raw:
+        return None
+    if raw.isdigit() or (raw.startswith("-") and raw[1:].isdigit()):
+        return data.get("users", {}).get(str(raw))
+    target = raw.lower()
+    for u in data.get("users", {}).values():
+        if str(u.get("username", "")).lower() == target:
+            return u
+    return None
+
+
+def test_grant_status(user_id):
+    u = data.get("users", {}).get(str(user_id))
+    if not u:
+        return None
+    claims = test_user_claims(user_id)
+    active = test_active_claim(user_id)
+    total = len(claims)
+    extra = int(u.get("test_extra_credits", 0))
+    allowed_total = 1 + extra if _test_settings().get("test_one_per_user", True) else 10**9
+    remaining_entitlement = max(0, allowed_total - total)
+    return {
+        "claims": claims,
+        "active": active,
+        "total": total,
+        "extra": extra,
+        "allowed_total": allowed_total,
+        "remaining_entitlement": remaining_entitlement,
+    }
+
+
+def _claim_test_config_sync(user_id, reason="standard", granted_credit_used=False):
+    normalize_test_data()
+    settings = _test_settings()
+    uid_key = str(user_id)
+    user = data.get("users", {}).get(uid_key)
+    if not user:
+        return False, None, "user_not_found"
+    if not settings.get("test_enabled", True):
+        return False, None, "disabled"
+
+    active = test_active_claim(user_id)
+    if active:
+        return False, active, "already_active"
+
+    user.setdefault("test_claim_count", 0)
+    user.setdefault("test_extra_credits", 0)
+    user.setdefault("test_history_ids", [])
+
+    prior = int(user.get("test_claim_count", 0))
+    extra = int(user.get("test_extra_credits", 0))
+
+    if settings.get("test_one_per_user", True):
+        if prior >= 1:
+            if extra <= 0:
+                return False, None, "limit_reached"
+            user["test_extra_credits"] = extra - 1
+            granted_credit_used = True
+    
+    free_item = None
+    for item in data["test_configs"].values():
+        if item.get("status") == "free" and item.get("config"):
+            free_item = item
+            break
+    if not free_item:
+        if granted_credit_used:
+            user["test_extra_credits"] = int(user.get("test_extra_credits", 0)) + 1
+        return False, None, "out_of_stock"
+
+    try:
+        duration = max(1, min(int(settings.get("test_duration_hours", TEST_DEFAULT_DURATION_HOURS)), TEST_MAX_DURATION_HOURS))
+    except Exception:
+        duration = TEST_DEFAULT_DURATION_HOURS
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    expires = now + timedelta(hours=duration)
+    claim_id = uid("test")
+    config_id = str(free_item["id"])
+
+    free_item["status"] = "assigned"
+    free_item["assigned_to"] = int(user_id)
+    free_item["claim_id"] = claim_id
+    free_item["assigned_at"] = now.isoformat()
+
+    claim = {
+        "id": claim_id,
+        "user_id": int(user_id),
+        "config_id": config_id,
+        "config": free_item["config"],
+        "status": "active",
+        "reason": reason,
+        "granted_credit_used": bool(granted_credit_used),
+        "created_at": now.isoformat(),
+        "expires_at": expires.isoformat(),
+        "duration_hours": duration,
+    }
+    data["test_claims"][claim_id] = claim
+    user["test_claim_count"] = prior + 1
+    user["test_history_ids"].append(claim_id)
+    return True, claim, "success"
+
+
+async def claim_test_config(user_id, reason="standard"):
+    async with test_lock:
+        result = _claim_test_config_sync(user_id, reason=reason)
+        if result[0]:
+            add_audit(user_id, "test_claim", result[1].get("id", ""), reason)
+            await save_data()
+        return result
+
+
+async def send_test_config_message(query, user_id):
+    claim = test_active_claim(user_id)
+    if not claim:
+        await query.answer("تست فعال ندارید یا تست شما تمام شده است.", show_alert=True)
+        return
+    config = claim.get("config", "")
+    await query.message.reply_text(
+        "🔐 کانفیگ تست NovaLinkVPN\n\n"
+        f"⏳ زمان باقی‌مانده: {test_remaining(claim)}\n"
+        f"📅 پایان: {claim.get('expires_at', '-')}\n\n"
+        "📋 کانفیگ:\n"
+        f"<code>{esc(config)}</code>\n\n"
+        "⚠️ این کانفیگ مخصوص تست است.",
+        parse_mode="HTML",
+    )
+    await query.answer("کانفیگ تست ارسال شد ✅")
+
+
+async def user_test_page(query, user_id):
+    normalize_test_data()
+    user = data.get("users", {}).get(str(user_id))
+    if not user:
+        await query.edit_message_text("❌ کاربر پیدا نشد.", reply_markup=back_home())
+        return
+    claim = test_active_claim(user_id)
+    await save_data()
+    status = test_grant_status(user_id)
+    free = test_free_count()
+    duration = _test_settings().get("test_duration_hours", TEST_DEFAULT_DURATION_HOURS)
+
+    if claim:
+        await query.edit_message_text(
+            "🧪 تست رایگان NovaLinkVPN\n\n"
+            "✅ تست فعال داری.\n\n"
+            f"⏳ باقی‌مانده: {test_remaining(claim)}\n"
+            f"📅 پایان: {claim.get('expires_at', '-')}\n"
+            f"🔢 تست دریافت‌شده: {status['total']}\n\n"
+            "برای دریافت مجدد، ابتدا باید تست فعلی تمام شود.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔑 دریافت کانفیگ تست", callback_data="test_config")],
+                [InlineKeyboardButton("🔄 بروزرسانی", callback_data="test_menu")],
+                [InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop")],
+                [InlineKeyboardButton("🔙 خانه", callback_data="home")],
+            ]),
+        )
+        return
+
+    if _test_settings().get("test_one_per_user", True) and status["remaining_entitlement"] <= 0:
+        await query.edit_message_text(
+            "🧪 تست رایگان NovaLinkVPN\n\n"
+            "⛔ سهم تست رایگان شما تمام شده است.\n\n"
+            f"📊 تعداد تست دریافت‌شده: {status['total']}\n"
+            f"🎁 تست اضافه از مدیر: {status['extra']}\n\n"
+            "برای استفاده بیشتر، با پشتیبانی تماس بگیر.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎫 پشتیبانی", callback_data="support")],
+                [InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop")],
+                [InlineKeyboardButton("🔙 خانه", callback_data="home")],
+            ]),
+        )
+        return
+
+    if free <= 0:
+        await query.edit_message_text(
+            "🧪 تست رایگان NovaLinkVPN\n\n"
+            "⚠️ موجودی تست در حال حاضر تمام شده است.\n"
+            "به‌محض شارژ موجودی دوباره می‌توانی درخواست بدهی.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 بررسی مجدد", callback_data="test_menu")],
+                [InlineKeyboardButton("🔙 خانه", callback_data="home")],
+            ]),
+        )
+        return
+
+    next_number = status["total"] + 1
+    extra_note = "🎁 این تست با مجوز اضافه فعال می‌شود." if next_number > 1 else "🎁 سهم تست رایگان اولیه شماست."
+    await query.edit_message_text(
+        "🧪 تست رایگان NovaLinkVPN\n\n"
+        "قبل از خرید، اول خودت امتحانش کن. 🚀\n\n"
+        f"⏱ مدت تست: {duration} ساعت\n"
+        f"📦 موجودی تست: {free} عدد\n"
+        f"🔢 تست بعدی شما: شماره {next_number}\n\n"
+        f"{extra_note}\n"
+        "✅ یک کانفیگ اختصاصی تحویل می‌گیری\n"
+        "✅ قبل از خرید می‌توانی کیفیت را بررسی کنی\n"
+        "✅ هر کانفیگ فقط یک‌بار در اختیار یک کاربر قرار می‌گیرد\n\n"
+        "آماده‌ای؟ 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎁 دریافت تست رایگان", callback_data="claim_test")],
+            [InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop")],
+            [InlineKeyboardButton("🔙 خانه", callback_data="home")],
+        ]),
+    )
+
+
+async def claim_test_button(query, user_id):
+    success, claim, reason = await claim_test_config(user_id)
+    if not success:
+        messages = {
+            "disabled": "⛔ سیستم تست رایگان فعلاً غیرفعال است.",
+            "already_active": f"✅ یک تست فعال داری. زمان باقی‌مانده: {test_remaining(claim)}",
+            "limit_reached": "⛔ سهم تست رایگان شما تمام شده است.\nبرای تست اضافه با پشتیبانی تماس بگیر.",
+            "out_of_stock": "⚠️ موجودی تست تمام شده است. بعداً دوباره بررسی کن.",
+            "user_not_found": "❌ حساب کاربری پیدا نشد.",
+        }
+        await query.edit_message_text(
+            messages.get(reason, "❌ دریافت تست انجام نشد."),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧪 تست رایگان", callback_data="test_menu")],
+                [InlineKeyboardButton("🔙 خانه", callback_data="home")],
+            ]),
+        )
+        return
+
+    await query.edit_message_text(
+        "🎉 تست رایگان با موفقیت فعال شد!\n\n"
+        f"⏱ مدت: {claim.get('duration_hours')} ساعت\n"
+        f"📅 پایان: {claim.get('expires_at')}\n\n"
+        "کانفیگ اختصاصی برایت آماده است. 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔑 دریافت کانفیگ تست", callback_data="test_config")],
+            [InlineKeyboardButton("🧪 وضعیت تست", callback_data="test_menu")],
+            [InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop")],
+            [InlineKeyboardButton("🔙 خانه", callback_data="home")],
+        ]),
+    )
+
+
+async def admin_test_center(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+    normalize_test_data()
+    active_users = sum(1 for u in data.get("users", {}).values() if test_active_claim(u.get("id", 0)))
+    expired = sum(1 for c in data["test_claims"].values() if c.get("status") != "active" or not test_active_claim(c.get("user_id", 0)))
+    await query.edit_message_text(
+        "🧪 مرکز مدیریت تست رایگان\n\n"
+        f"📦 کل کانفیگ تست: {test_total_count()}\n"
+        f"🟢 آماده تحویل: {test_free_count()}\n"
+        f"🔴 تحویل‌شده: {test_assigned_count()}\n"
+        f"👥 کاربران دارای تست فعال: {active_users}\n"
+        f"📊 کل تست‌های صادرشده: {len(data['test_claims'])}\n"
+        f"⏱ مدت تست: {_test_settings().get('test_duration_hours', TEST_DEFAULT_DURATION_HOURS)} ساعت\n"
+        f"⚙️ سیستم: {'🟢 فعال' if _test_settings().get('test_enabled', True) else '🔴 خاموش'}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ افزودن کانفیگ تست", callback_data="test_add_configs")],
+            [InlineKeyboardButton("🎁 مجوز تست اضافه", callback_data="test_grant")],
+            [InlineKeyboardButton("👥 کاربران و سوابق تست", callback_data="test_users")],
+            [InlineKeyboardButton("🟢 کانفیگ‌های آزاد", callback_data="test_free_list")],
+            [InlineKeyboardButton("🔴 کانفیگ‌های تحویل‌شده", callback_data="test_sold_list")],
+            [InlineKeyboardButton("📊 آمار تست", callback_data="test_stats")],
+            [InlineKeyboardButton("⚙️ تنظیمات تست", callback_data="test_settings")],
+            [InlineKeyboardButton("🗑️ پاک‌کردن موجودی آزاد", callback_data="test_clear_free")],
+            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin_home")],
+        ]),
+    )
+
+
+async def admin_test_users(query):
+    if not can_manage_users(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+    rows = []
+    ranked = []
+    for u in data.get("users", {}).values():
+        st = test_grant_status(u.get("id", 0))
+        if st and st["total"] > 0:
+            ranked.append((u, st))
+    ranked.sort(key=lambda x: max([c.get("created_at", "") for c in x[1]["claims"]] or [""]), reverse=True)
+    for u, st in ranked[:40]:
+        name = (u.get("first_name") or u.get("username") or str(u.get("id")))[:24]
+        active = "🟢" if st["active"] else "⚪"
+        rows.append([InlineKeyboardButton(
+            f"{active} {name} • {st['total']} تست • 🎁 {st['extra']}",
+            callback_data=f"test_user_view:{u.get('id')}",
+        )])
+    if not rows:
+        body = "👥 هنوز کسی تست دریافت نکرده است."
+    else:
+        body = "👥 کاربران تست‌گرفته\n\nفقط کاربرانی که حداقل یک تست گرفته‌اند نمایش داده می‌شوند."
+    rows.append([InlineKeyboardButton("🔎 جستجو / مجوز با ID", callback_data="test_grant")])
+    rows.append([InlineKeyboardButton("🔙 مدیریت تست", callback_data="admin_test")])
+    await query.edit_message_text(body, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def admin_test_user_view(query, user_id):
+    if not can_manage_users(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+    u = data.get("users", {}).get(str(user_id))
+    if not u:
+        await query.edit_message_text("❌ کاربر پیدا نشد.", reply_markup=back_admin())
+        return
+    st = test_grant_status(user_id)
+    claims = sorted(st["claims"], key=lambda x: x.get("created_at", ""), reverse=True)
+    lines = [
+        "👤 وضعیت تست کاربر",
+        "",
+        f"🆔 ID: {u.get('id')}",
+        f"🔗 Username: @{u.get('username') or '-'}",
+        f"📊 تست دریافت‌شده: {st['total']}",
+        f"🎁 مجوز تست اضافه باقی‌مانده: {st['extra']}",
+        f"🟢 تست فعال: {'بله' if st['active'] else 'خیر'}",
+        "",
+        "📜 سوابق اخیر:",
+    ]
+    for c in claims[:8]:
+        lines.append(f"• {c.get('created_at', '-')} | {c.get('status', '-')} | {c.get('reason', 'standard')}")
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎁 یک تست اضافه مجاز کن", callback_data=f"test_grant_user:{user_id}")],
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"test_user_view:{user_id}")],
+            [InlineKeyboardButton("🔙 کاربران تست", callback_data="test_users")],
+        ]),
+    )
+
+
+async def admin_test_free_list(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+    normalize_test_data()
+    free = [x for x in data["test_configs"].values() if x.get("status") == "free"]
+    lines = [f"🟢 کانفیگ‌های تست آزاد\n\nتعداد: {len(free)}\n"]
+    for item in free[:60]:
+        lines.append(f"• {item.get('id')} | {mask_config(item.get('config', ''))}")
+    if not free:
+        lines.append("\nهیچ کانفیگ آزادی وجود ندارد.")
+    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="test_free_list")],
+        [InlineKeyboardButton("🔙 مدیریت تست", callback_data="admin_test")],
+    ]))
+
+
+async def admin_test_sold_list(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+    normalize_test_data()
+    sold = sorted([x for x in data["test_configs"].values() if x.get("status") == "assigned"], key=lambda x: x.get("assigned_at", ""), reverse=True)
+    lines = [f"🔴 کانفیگ‌های تست تحویل‌شده\n\nتعداد: {len(sold)}\n"]
+    for item in sold[:60]:
+        lines.append(
+            f"• {item.get('id')} | 👤 {item.get('assigned_to', '-')}\n"
+            f"  🕒 {item.get('assigned_at', '-')} | 🔑 {mask_config(item.get('config', ''))}"
+        )
+    if not sold:
+        lines.append("هیچ کانفیگی تحویل نشده است.")
+    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="test_sold_list")],
+        [InlineKeyboardButton("🔙 مدیریت تست", callback_data="admin_test")],
+    ]))
+
+
+async def admin_test_stats(query):
+    if not can_manage_services(query.from_user.id):
+        await query.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin())
+        return
+    normalize_test_data()
+    claims = list(data["test_claims"].values())
+    active = sum(1 for c in claims if test_active_claim(c.get("user_id", 0)))
+    expired = len(claims) - active
+    users_received = sum(1 for u in data.get("users", {}).values() if int(u.get("test_claim_count", 0)) > 0)
+    extra_granted = sum(int(u.get("test_extra_credits", 0)) for u in data.get("users", {}).values())
+    await query.edit_message_text(
+        "📊 آمار تست رایگان\n\n"
+        f"👥 کاربران تست‌گرفته: {users_received}\n"
+        f"🧪 کل تست‌های صادرشده: {len(claims)}\n"
+        f"🟢 تست‌های فعال: {active}\n"
+        f"⏰ تست‌های تمام‌شده: {expired}\n"
+        f"🎁 مجوزهای اضافه باقی‌مانده: {extra_granted}\n"
+        f"📦 موجودی آزاد: {test_free_count()}\n"
+        f"📦 کل موجودی: {test_total_count()}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 کاربران تست‌گرفته", callback_data="test_users")],
+            [InlineKeyboardButton("🔙 مدیریت تست", callback_data="admin_test")],
+        ]),
+    )
+
+
+async def admin_test_settings(query):
+    if not is_owner(query.from_user.id):
+        await query.edit_message_text("⛔ فقط Owner می‌تواند تنظیمات تست را تغییر دهد.", reply_markup=back_admin())
+        return
+    s = _test_settings()
+    await query.edit_message_text(
+        "⚙️ تنظیمات تست رایگان\n\n"
+        f"🧪 وضعیت: {'🟢 فعال' if s.get('test_enabled', True) else '🔴 خاموش'}\n"
+        f"⏱ مدت تست: {s.get('test_duration_hours', TEST_DEFAULT_DURATION_HOURS)} ساعت\n"
+        f"👤 محدودیت یک تست پایه: {'🟢 فعال' if s.get('test_one_per_user', True) else '🔴 غیرفعال'}\n"
+        "🎁 تست اضافه فقط با مجوز مدیر صادر می‌شود.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 روشن / خاموش", callback_data="test_toggle")],
+            [InlineKeyboardButton("⏱ تغییر مدت تست", callback_data="test_duration")],
+            [InlineKeyboardButton("👤 محدودیت یک تست", callback_data="test_one_per_user")],
+            [InlineKeyboardButton("🔙 مدیریت تست", callback_data="admin_test")],
+        ]),
+    )
+
+
+async def admin_test_clear_free(query):
+    if not is_owner(query.from_user.id):
+        await query.answer("فقط Owner.", show_alert=True)
+        return
+    normalize_test_data()
+    removed = 0
+    for key in list(data["test_configs"].keys()):
+        if data["test_configs"][key].get("status") == "free":
+            data["test_configs"].pop(key, None)
+            removed += 1
+    await save_data()
+    await query.edit_message_text(
+        f"🗑️ کانفیگ‌های آزاد تست حذف شدند.\n\n➖ حذف‌شده: {removed}",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 مدیریت تست", callback_data="admin_test")]]),
+    )
+
+
+def test_users_with_any_history():
+    return [u for u in data.get("users", {}).values() if int(u.get("test_claim_count", 0)) > 0]
+
+
+def test_dashboard_badge():
+    s = _test_settings()
+    return f"{'🟢' if s.get('test_enabled', True) else '🔴'} {test_free_count()} آزاد"
+
+
+def test_status_for_account(user_id):
+    st = test_grant_status(user_id)
+    if not st:
+        return "🧪 تست: بدون سابقه"
+    active = st.get("active")
+    if active:
+        return f"🧪 تست: 🟢 فعال | {test_remaining(active)}"
+    return f"🧪 تست: {'✅ قابل دریافت' if st['remaining_entitlement'] > 0 else '⛔ سهم تمام'} | دریافت‌شده: {st['total']}"
+
+
+def build_test_admin_user_line(u):
+    st = test_grant_status(u.get("id", 0)) or {"total": 0, "extra": 0, "active": None}
+    return f"{u.get('id')} | {u.get('username') or u.get('first_name') or '-'} | تست: {st['total']} | اضافه: {st['extra']}"
+
+
+# Final override of default_data below adds the test collections/settings.
 def default_data():
+
     d = BASE_DEFAULT_DATA()
-    d.setdefault("meta", {})["version"] = 5
+    d.setdefault("meta", {})["version"] = 6
     d.setdefault("settings", {}).update({
         "support_username": PUBLIC_OWNER_USERNAME,
+        "test_enabled": True,
+        "test_duration_hours": TEST_DEFAULT_DURATION_HOURS,
+        "test_one_per_user": True,
+        "test_allowance_mode": "admin_grant",
+        "test_low_stock_threshold": 5,
         "admin_display_id": str(ADMIN_ID or ""),
         "public_owner_username": PUBLIC_OWNER_USERNAME,
         "public_owner_url": PUBLIC_OWNER_URL,
@@ -3595,6 +4158,8 @@ def default_data():
     d.setdefault("notifications", {})
     d.setdefault("audit_logs", {})
     d.setdefault("favorites", {})
+    d.setdefault("test_configs", {})
+    d.setdefault("test_claims", {})
     return d
 
 
@@ -3627,11 +4192,15 @@ def normalize_data():
         u.setdefault("last_order_id", None)
         u.setdefault("wallet_topup_ids", [])
         u.setdefault("rewarded_referral", False)
+        u.setdefault("test_claim_count", 0)
+        u.setdefault("test_extra_credits", 0)
+        u.setdefault("test_history_ids", [])
     for s in data.get("services", {}).values():
         s.setdefault("category", "عمومی")
         s.setdefault("priority", 0)
         s.setdefault("badge", "")
         s.setdefault("min_stock_alert_sent", False)
+    normalize_test_data()
 
 
 def user_record(user_id):
@@ -3723,9 +4292,10 @@ def user_keyboard():
     unread=unread_notifications(getattr(user_keyboard, "current_user_id", 0)) if getattr(user_keyboard, "current_user_id", 0) else 0
     label = f"🔔 اعلان‌ها ({unread})" if unread else "🔔 اعلان‌ها"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop"), InlineKeyboardButton("📦 سرویس‌های من", callback_data="my_services")],
-        [InlineKeyboardButton("👤 حساب کاربری", callback_data="account"), InlineKeyboardButton("💳 کیف پول", callback_data="wallet")],
-        [InlineKeyboardButton("🧾 سفارش‌ها", callback_data="orders"), InlineKeyboardButton(label, callback_data="notifications")],
+        [InlineKeyboardButton("🛒 خرید سرویس", callback_data="shop"), InlineKeyboardButton("🧪 تست رایگان", callback_data="test_menu")],
+        [InlineKeyboardButton("📦 سرویس‌های من", callback_data="my_services"), InlineKeyboardButton("👤 حساب کاربری", callback_data="account")],
+        [InlineKeyboardButton("💳 کیف پول", callback_data="wallet"), InlineKeyboardButton("🧾 سفارش‌ها", callback_data="orders")],
+        [InlineKeyboardButton(label, callback_data="notifications"), InlineKeyboardButton("🎁 کد تخفیف", callback_data="discount")],
         [InlineKeyboardButton("🎁 کد تخفیف", callback_data="discount"), InlineKeyboardButton("⭐ دعوت دوستان", callback_data="referral")],
         [InlineKeyboardButton("🎫 پشتیبانی", callback_data="support"), InlineKeyboardButton("📢 کانال", callback_data="channel")],
     ])
@@ -4103,7 +4673,7 @@ async def show_account(query,user_id):
     await query.edit_message_text(
         f"👤 حساب کاربری\n\n🆔 ID: <code>{user_id}</code>\n"
         f"👤 نام: {esc(u.get('first_name') or '-') }\n📦 سرویس‌های فعال: {active}\n💳 موجودی: {money(u.get('balance',0))} تومان\n"
-        f"⭐ امتیاز: {u.get('points',0)}\n❤️ علاقه‌مندی‌ها: {fav}\n🔔 اعلان خوانده‌نشده: {unread}\n🗓 عضویت: {esc(u.get('created_at','-'))}",
+        f"⭐ امتیاز: {u.get('points',0)}\n❤️ علاقه‌مندی‌ها: {fav}\n🔔 اعلان خوانده‌نشده: {unread}\n{test_status_for_account(user_id)}\n🗓 عضویت: {esc(u.get('created_at','-'))}",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧾 سفارش‌ها",callback_data="orders"),InlineKeyboardButton("🔔 اعلان‌ها",callback_data="notifications")],[InlineKeyboardButton("🔙 خانه",callback_data="home")]]),parse_mode="HTML")
 
 
@@ -4327,6 +4897,91 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if k=="admin_reports_pro": return await admin_reports_pro(q)
     if k=="admin_audit": return await admin_audit(q)
     if k=="config_search": return await config_search_start(q,context)
+    # 🧪 FREE TEST USER ROUTES
+    if k == "test_menu":
+        return await user_test_page(q, q.from_user.id)
+    if k == "claim_test":
+        return await claim_test_button(q, q.from_user.id)
+    if k == "test_config":
+        return await send_test_config_message(q, q.from_user.id)
+
+    if k == "admin_test":
+        if not can_manage_services(q.from_user.id):
+            await q.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin()); return
+        return await admin_test_center(q)
+    if k == "test_users":
+        return await admin_test_users(q)
+    if k.startswith("test_user_view:"):
+        return await admin_test_user_view(q, k.split(":",1)[1])
+    if k == "test_free_list":
+        return await admin_test_free_list(q)
+    if k == "test_sold_list":
+        return await admin_test_sold_list(q)
+    if k == "test_stats":
+        return await admin_test_stats(q)
+    if k == "test_settings":
+        return await admin_test_settings(q)
+    if k == "test_clear_free":
+        return await admin_test_clear_free(q)
+    if k == "test_grant":
+        if not can_manage_users(q.from_user.id):
+            await q.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin()); return
+        context.user_data["state"] = "test_grant"
+        await q.edit_message_text(
+            "🎁 مجوز تست اضافه\n\n"
+            "شناسه عددی کاربر یا username را بفرست.\n"
+            "مثال: 123456789 یا @username\n\n"
+            "بعد از پیدا شدن کاربر، تعداد تست اضافه را می‌گیریم.\n/cancel برای لغو",
+            reply_markup=back_admin(),
+        )
+        return
+    if k.startswith("test_grant_user:"):
+        if not can_manage_users(q.from_user.id):
+            await q.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin()); return
+        target_id = k.split(":",1)[1]
+        target = data.get("users",{}).get(str(target_id))
+        if not target:
+            await q.edit_message_text("❌ کاربر پیدا نشد.", reply_markup=back_admin()); return
+        context.user_data["state"] = f"test_grant_count:{target_id}"
+        await q.edit_message_text(
+            f"🎁 مجوز تست اضافه برای کاربر {target_id}\n\n"
+            "تعداد مجوز را به صورت عدد بفرست.\nمثال: 1 یا 3",
+            reply_markup=back_admin(),
+        )
+        return
+    if k == "test_toggle":
+        if not is_owner(q.from_user.id):
+            await q.answer("فقط Owner.", show_alert=True); return
+        normalize_test_data()
+        _test_settings()["test_enabled"] = not _test_settings().get("test_enabled", True)
+        await save_data()
+        return await admin_test_settings(q)
+    if k == "test_duration":
+        if not is_owner(q.from_user.id):
+            await q.answer("فقط Owner.", show_alert=True); return
+        context.user_data["state"] = "test_duration"
+        await q.edit_message_text("⏱ مدت تست را به ساعت بفرست.\nحداقل 1 و حداکثر 168 ساعت.", reply_markup=back_admin())
+        return
+    if k == "test_one_per_user":
+        if not is_owner(q.from_user.id):
+            await q.answer("فقط Owner.", show_alert=True); return
+        normalize_test_data()
+        _test_settings()["test_one_per_user"] = not _test_settings().get("test_one_per_user", True)
+        await save_data()
+        return await admin_test_settings(q)
+    if k == "test_add_configs":
+        if not can_manage_services(q.from_user.id):
+            await q.edit_message_text("⛔ دسترسی ندارید.", reply_markup=back_admin()); return
+        context.user_data["state"] = "add_test_configs"
+        await q.edit_message_text(
+            "➕ افزودن کانفیگ تست\n\nهر کانفیگ را در یک خط جدا بفرست.\n\n"
+            "مثال:\nvless://...\nvmess://...\n\n"
+            "♻️ موارد تکراری خودکار حذف می‌شوند.\n"
+            "🔐 موجودی تست از موجودی فروش کاملاً جداست.\n/cancel برای لغو",
+            reply_markup=back_admin(),
+        )
+        return
+
     if k.startswith("broadcast_target:"):
         role=get_admin_role(q.from_user.id)
         if not can_broadcast(q.from_user.id): await q.edit_message_text("⛔ دسترسی ندارید.",reply_markup=back_admin()); return
@@ -4354,6 +5009,87 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await add_topup_request(update,amount,context)
     if state=="config_search":
         context.user_data.clear(); return await handle_config_search(update,text)
+    # 🧪 TEST CONFIG IMPORT
+    if state == "add_test_configs":
+        if not can_manage_services(update.effective_user.id):
+            context.user_data.clear(); await update.message.reply_text("⛔ دسترسی ندارید."); return
+        normalize_test_data()
+        candidates = [x.strip() for x in text.splitlines() if x.strip()]
+        added = duplicate = 0
+        for cfg in candidates:
+            if test_config_duplicate(cfg):
+                duplicate += 1
+                continue
+            item_id = uid("testcfg")
+            data["test_configs"][item_id] = {
+                "id": item_id, "config": cfg, "status": "free",
+                "assigned_to": None, "claim_id": None, "assigned_at": None, "created_at": now_iso()
+            }
+            added += 1
+        context.user_data.clear(); await save_data()
+        await update.message.reply_text(
+            f"✅ موجودی تست بروزرسانی شد.\n\n➕ اضافه‌شده: {added}\n♻️ تکراری: {duplicate}\n🟢 موجودی آزاد: {test_free_count()}",
+            reply_markup=admin_keyboard(get_admin_role(update.effective_user.id)),
+        )
+        return
+
+    # 🧪 GRANT EXTRA TEST BY USER ID / USERNAME
+    if state == "test_grant":
+        if not can_manage_users(update.effective_user.id):
+            context.user_data.clear(); await update.message.reply_text("⛔ دسترسی ندارید."); return
+        target = find_user_identifier(text)
+        if not target:
+            await update.message.reply_text("❌ کاربر پیدا نشد. ID یا username صحیح بفرست.", reply_markup=back_admin())
+            return
+        context.user_data["state"] = f"test_grant_count:{target['id']}"
+        await update.message.reply_text(
+            f"👤 کاربر پیدا شد: {target.get('first_name') or target.get('username') or target['id']}\n"
+            f"🆔 {target['id']}\n"
+            f"🧪 تست‌های قبلی: {target.get('test_claim_count', 0)}\n"
+            f"🎁 مجوز اضافه فعلی: {target.get('test_extra_credits', 0)}\n\n"
+            "چند تست اضافه مجاز شود؟\nمثال: 1",
+            reply_markup=back_admin(),
+        )
+        return
+
+    if state and state.startswith("test_grant_count:"):
+        if not can_manage_users(update.effective_user.id):
+            context.user_data.clear(); await update.message.reply_text("⛔ دسترسی ندارید."); return
+        target_id = state.split(":",1)[1]
+        target = data.get("users",{}).get(str(target_id))
+        try:
+            count = int(text)
+            if count < 1 or count > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ تعداد باید بین 1 تا 100 باشد.")
+            return
+        if not target:
+            context.user_data.clear(); await update.message.reply_text("❌ کاربر پیدا نشد.", reply_markup=back_admin()); return
+        target["test_extra_credits"] = int(target.get("test_extra_credits",0)) + count
+        add_audit(update.effective_user.id, "grant_test", target_id, f"count={count}")
+        context.user_data.clear(); await save_data()
+        await update.message.reply_text(
+            f"✅ مجوز تست اضافه شد.\n\n👤 کاربر: {target_id}\n🎁 تعداد مجاز اضافه‌شده: {count}\n🎁 موجودی مجوز اضافه فعلی: {target.get('test_extra_credits',0)}",
+            reply_markup=admin_keyboard(get_admin_role(update.effective_user.id)),
+        )
+        return
+
+    if state == "test_duration":
+        if not is_owner(update.effective_user.id):
+            context.user_data.clear(); await update.message.reply_text("⛔ فقط Owner."); return
+        try:
+            hours = int(text)
+            if hours < 1 or hours > TEST_MAX_DURATION_HOURS:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ عدد باید بین 1 تا 168 باشد.")
+            return
+        _test_settings()["test_duration_hours"] = hours
+        context.user_data.clear(); await save_data()
+        await update.message.reply_text(f"✅ مدت تست روی {hours} ساعت تنظیم شد.", reply_markup=admin_keyboard("owner"))
+        return
+
     if state and state.startswith("broadcast_text:"):
         target=state.split(":",1)[1]; context.user_data.clear(); return await run_targeted_broadcast(update,text,context,target)
     if text.startswith("/discount "):
