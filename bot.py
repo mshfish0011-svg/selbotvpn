@@ -1820,15 +1820,21 @@ async def admin_backup(query):
 async def backup_now(query, context):
     path = await make_backup("manual")
 
-    await context.bot.send_document(
-        chat_id=query.from_user.id,
-        document=InputFile(path),
-        caption=(
-            f"💾 بکاپ کامل {BRAND}\n\n"
-            "این فایل شامل کاربران، سفارش‌ها، کیف پول، سرویس‌ها، "
-            "تخفیف‌ها، تیکت‌ها و تنظیمات است."
-        ),
-    )
+    # IMPORTANT: PTB InputFile must receive an opened binary file (or bytes),
+    # not the path string itself. Passing the path string uploads the path text
+    # as the document, which is why Telegram could show a tiny ~58-byte file.
+    filename = os.path.basename(path)
+    with open(path, "rb") as backup_fp:
+        await context.bot.send_document(
+            chat_id=query.from_user.id,
+            document=InputFile(backup_fp, filename=filename),
+            caption=(
+                f"💾 بکاپ کامل {BRAND}\n\n"
+                "این فایل شامل کاربران، سفارش‌ها، کیف پول، سرویس‌ها، "
+                "تخفیف‌ها، تیکت‌ها و تنظیمات است.\n\n"
+                f"📄 فایل: {filename}"
+            ),
+        )
 
     await query.answer("بکاپ ساخته شد ✅")
 
@@ -3225,22 +3231,23 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     doc = update.message.document
     filename = (doc.file_name or "").strip()
-    is_json = filename.lower().endswith(".json")
     restore_mode = context.user_data.get("state") == "restore_file"
     looks_like_backup = filename.lower().startswith("novalinkvpn_backup")
+    is_json_name = filename.lower().endswith(".json")
+    mime = (doc.mime_type or "").lower()
 
-    if not is_json:
-        await update.message.reply_text(
-            "❌ فقط فایل JSON قابل بازیابی است.\n\n"
-            "فایل بکاپ باید با پسوند .json باشد."
-        )
-        return
-
-    if not restore_mode and not looks_like_backup:
+    # Telegram Desktop may expose a document as application/octet-stream even
+    # when it is a JSON backup. During restore, validate the actual bytes rather
+    # than relying on filename/MIME metadata.
+    if not restore_mode and not (is_json_name or looks_like_backup or mime == "application/octet-stream"):
         await update.message.reply_text(
             "📄 این فایل دریافت شد، اما حالت بازیابی فعال نیست.\n\n"
             "اول از پنل مدیریت وارد «💾 بکاپ / بازیابی» → «📤 حالت بازیابی» شو."
         )
+        return
+
+    if not restore_mode and not (is_json_name or looks_like_backup or mime == "application/octet-stream"):
+        await update.message.reply_text("❌ فقط فایل JSON قابل بازیابی است.")
         return
 
     if doc.file_size and doc.file_size > 10 * 1024 * 1024:
