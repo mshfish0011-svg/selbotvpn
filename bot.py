@@ -382,6 +382,12 @@ async def ensure_user(tg_user):
 # KEYBOARDS
 # =========================================================
 
+def back_home():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")]])
+
+def back_admin():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin_home")]])
+
 def user_keyboard():
     unread = unread_notifications(getattr(user_keyboard, "current_user_id", 0)) if getattr(user_keyboard, "current_user_id", 0) else 0
     label = f"🔔 اعلان‌ها ({unread})" if unread else "🔔 اعلان‌ها"
@@ -1829,20 +1835,28 @@ async def backup_now(query, context):
 
 async def backup_list(query):
     os.makedirs(BACKUP_DIR, exist_ok=True)
-
-    names = sorted(
-        os.listdir(BACKUP_DIR),
-        reverse=True,
-    )[:15]
-
+    names = sorted([n for n in os.listdir(BACKUP_DIR) if n.lower().endswith(".json")], reverse=True)[:15]
     if not names:
-        text = "📂 هنوز بکاپی وجود ندارد."
-    else:
-        text = "📂 بکاپ‌های موجود:\n\n" + "\n".join(
-            f"• {n}" for n in names
+        text = (
+            "📂 <b>لیست بکاپ‌ها</b>\n\n"
+            "هنوز هیچ بکاپ JSON روی این سرویس وجود ندارد.\n\n"
+            "💡 روی «💾 دریافت بکاپ جدید» بزن تا یک بکاپ ساخته شود."
         )
-
-    await query.edit_message_text(text, reply_markup=back_admin())
+    else:
+        text = (
+            f"📂 <b>لیست بکاپ‌ها</b>\n\nتعداد: <b>{len(names)}</b>\n\n"
+            + "\n".join(f"{i+1}. <code>{esc(n)}</code>" for i, n in enumerate(names))
+            + "\n\n📤 برای بازیابی، فایل JSON موردنظر را در «حالت بازیابی» ارسال کن."
+        )
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💾 دریافت بکاپ جدید", callback_data="backup_now")],
+            [InlineKeyboardButton("📤 حالت بازیابی", callback_data="restore_start")],
+            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin_home")],
+        ]),
+        parse_mode="HTML",
+    )
 
 
 # =========================================================
@@ -3264,14 +3278,16 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     global data
+    old_data = data
     data = restored
 
     try:
         normalize_data()
-        normalize_test_system()
+        normalize_test_data()
         save_data_sync()
     except Exception as e:
         logger.exception("Restore normalization/save failed")
+        data = old_data
         context.user_data.pop("state", None)
         await update.message.reply_text(
             "❌ داده بکاپ خوانده شد اما هنگام ثبت نهایی خطا رخ داد.\n\n"
@@ -4958,6 +4974,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if k=="admin_reports_pro": return await admin_reports_pro(q)
     if k=="admin_audit": return await admin_audit(q)
     if k=="config_search": return await config_search_start(q,context)
+    # 💾 BACKUP / RESTORE — explicit owner routes
+    if k == "admin_backup":
+        if not is_owner(q.from_user.id):
+            await q.answer("فقط Owner.", show_alert=True); return
+        return await admin_backup(q)
+    if k == "backup_now":
+        if not is_owner(q.from_user.id):
+            await q.answer("فقط Owner.", show_alert=True); return
+        return await backup_now(q, context)
+    if k == "backup_list":
+        if not is_owner(q.from_user.id):
+            await q.answer("فقط Owner.", show_alert=True); return
+        return await backup_list(q)
+    if k == "restore_start":
+        if not is_owner(q.from_user.id):
+            await q.answer("فقط Owner.", show_alert=True); return
+        context.user_data["state"] = "restore_file"
+        await q.edit_message_text(
+            "📤 <b>حالت بازیابی بکاپ</b>\n\n"
+            "الان فایل <b>JSON</b> بکاپ را همینجا ارسال کن.\n\n"
+            "🛡️ قبل از جایگزینی، ربات خودش یک بکاپ ایمنی از اطلاعات فعلی می‌گیرد.\n"
+            "❗ فقط فایل JSON که خود ربات ساخته است ارسال کن.\n\n"
+            "برای لغو: /cancel",
+            reply_markup=back_admin(), parse_mode="HTML")
+        return
     # 🧪 FREE TEST USER ROUTES
     if k == "test_menu":
         return await user_test_page(q, q.from_user.id)
